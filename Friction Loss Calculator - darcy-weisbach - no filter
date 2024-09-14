@@ -1,0 +1,45 @@
+function friction_loss = calculate_friction_loss()
+    % Given values from the problem
+    rho = 0.061; % Density (lbm/ft^3)
+    mu = 0.000734; % Viscosity (lbm/(ft*min))
+    epsilon = 0.0003; % Roughness (ft)
+    D_h = 22; % Hydraulic diameter (inches)
+    Q = 1200; % Flow rate (cfm)
+    L = 130; % Length of the duct (ft)
+    
+    % Conversion factors
+    inches_to_feet = 1/12; % 1 inch = 1/12 feet
+    fpm_to_ftps = 1/60; % 1 foot per minute = 1/60 foot per second
+
+    % Calculate the cross-sectional area of the duct (in ft^2)
+    A_d = pi / 4 * (D_h * inches_to_feet)^2; % Convert D_h to feet for area calculation
+    
+    % Calculate the velocity of the fluid (in fpm)
+    V = Q / A_d; % Flow velocity in fpm
+    
+    % Convert velocity to ft/s for Reynolds number calculation
+    V_ftps = V * fpm_to_ftps; % Convert to ft/s
+    
+    % Calculate the Reynolds number
+    Re = (rho * V_ftps * D_h * inches_to_feet) / (12 * mu); % Note: mu is in lbm/(ft*min)
+    
+    % Calculate the friction factor using the Colebrook-White equation (iterative)
+    % We will use the approximation provided with f = 0.0160
+    f = 0.0160; % Friction factor (pre-determined or found using iterative methods)
+
+    % Velocity pressure (p_v) in inches of water column
+    p_v = rho * (V / 1097)^2; % in. of water
+    
+    % Calculate the friction loss (delta_p_f) in inches of water column
+    delta_p_f = (12 * f * L / D_h) * p_v; % in. of water
+    
+    % Display results
+    fprintf('Cross-sectional area of the duct: %.2f ft^2\n', A_d);
+    fprintf('Flow velocity: %.2f fpm\n', V);
+    fprintf('Reynolds number: %.2e\n', Re);
+    fprintf('Velocity pressure (p_v): %.2f in. of water\n', p_v);
+    fprintf('Friction loss (Δp_f): %.2f in. of water\n', delta_p_f);
+    
+    % Return friction loss as output
+    friction_loss = delta_p_f;
+end
