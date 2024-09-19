@@ -1,0 +1,58 @@
+function plot_total_pressure_loss_vs_flow_rate()
+    % Given values for duct
+    lambda = 0.02; % Darcy-Weisbach friction coefficient (dimensionless)
+    L = 130; % Length of duct or pipe (ft)
+    D_h = 22 / 12; % Hydraulic diameter in feet (convert from inches)
+    rho_f = 0.061; % Density of the fluid (lbm/ft^3)
+
+    % Conversion factors
+    CFM_to_ft3ps = 1 / 60; % 1 CFM = 1/60 ft^3/s
+    psf_to_inH2O = 0.192; % 1 psf = 0.192 inH2O
+
+    % Define range of flow rates (CFM) from 0 to 1300
+    flow_rate_CFM = linspace(0, 1300, 100); % 100 points from 0 to 1300 CFM
+
+    % Pre-allocate arrays for results
+    duct_pressure_loss_inH2O = zeros(size(flow_rate_CFM)); % Duct pressure loss (inH2O)
+    filter_pressure_drop_inH2O = zeros(size(flow_rate_CFM)); % Filter pressure drop (inH2O)
+    total_pressure_drop_inH2O = zeros(size(flow_rate_CFM)); % Total pressure drop (inH2O)
+
+    % Calculate pressure loss for each flow rate
+    for i = 1:length(flow_rate_CFM)
+        % Current flow rate in ft^3/s
+        Q_ft3ps = flow_rate_CFM(i) * CFM_to_ft3ps;
+        
+        % Calculate the velocity of the fluid (in ft/s)
+        A_d = pi / 4 * D_h^2; % Cross-sectional area in ft^2
+        v = Q_ft3ps / A_d; % Flow velocity in ft/s
+        
+        % Calculate major pressure loss in duct using Darcy-Weisbach equation
+        % Delta_P_major_loss = lambda * (L / D_h) * (rho_f * v^2 / 2)
+        delta_p_major = lambda * (L / D_h) * (rho_f * v^2 / 2); % Pressure loss in psf
+        
+        % Convert duct pressure loss to inches of water column (inH2O)
+        duct_pressure_loss_inH2O(i) = delta_p_major * psf_to_inH2O;
+        
+        % Calculate filter pressure drop using the given formula
+        % Filter Pressure Drop (inH2O) = 0.004878 * Flow Rate (CFM)
+        filter_pressure_drop_inH2O(i) = 0.004878 * flow_rate_CFM(i);
+        
+        % Total pressure drop (duct + filter)
+        total_pressure_drop_inH2O(i) = duct_pressure_loss_inH2O(i) + filter_pressure_drop_inH2O(i);
+    end
+
+    % Plot the results
+    figure;
+    plot(flow_rate_CFM, total_pressure_drop_inH2O, 'b-', 'LineWidth', 2);
+    hold on;
+    plot(flow_rate_CFM, duct_pressure_loss_inH2O, 'r--', 'LineWidth', 2);
+    plot(flow_rate_CFM, filter_pressure_drop_inH2O, 'g--', 'LineWidth', 2);
+    xlabel('Volumetric Flow Rate (CFM)');
+    ylabel('Pressure Loss (inH2O)');
+    title('Total Pressure Drop vs. Volumetric Flow Rate');
+    legend('Total Pressure Drop', 'Duct Pressure Loss', 'Filter Pressure Drop');
+    grid on;
+    
+    % Display the maximum total pressure drop
+    fprintf('Maximum Total Pressure Drop: %.4f inH2O\n', max(total_pressure_drop_inH2O));
+end
