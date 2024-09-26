@@ -1,0 +1,52 @@
+from __future__ import print_function
+import qwiic_relay
+import time
+import sys
+
+DUAL_SOLID_STATE_RELAY = 0x0A  # Replace this with the correct address if different
+
+# Initialize the relay with the specified address
+myRelays = qwiic_relay.QwiicRelay(DUAL_SOLID_STATE_RELAY)
+
+def runFanControl():
+    print("\nFan Speed Control with SparkFun Qwiic Relay\n")
+
+    if myRelays.begin() == False:
+        print("The Qwiic Relay isn't connected to the system. Please check your connection", file=sys.stderr)
+        return
+
+    print("Relay initialized and ready to use.")
+    
+    try:
+        while True:
+            # Get user input for fan speed percentage (0-100)
+            user_input = input("Enter fan speed percentage (0-100): ")
+
+            try:
+                # Convert input to float and validate range
+                speed_percent = float(user_input)
+                if not 0 <= speed_percent <= 100:
+                    print("Please enter a value between 0 and 100.")
+                    continue
+            except ValueError:
+                print("Invalid input. Please enter a number between 0 and 100.")
+                continue
+
+            # Convert the percentage to a PWM value in the range 0-120
+            pwm_value = int((speed_percent / 100) * 120)
+
+            # Set the PWM value to the first relay
+            myRelays.set_slow_pwm(1, pwm_value)
+
+            print(f"Fan speed set to {speed_percent}% (PWM: {pwm_value}).")
+            print("Press Ctrl+C to exit or change the fan speed.")
+
+    except (KeyboardInterrupt, SystemExit):
+        print("\nStopping fan and exiting...")
+        # Set relays off before exiting
+        myRelays.set_slow_pwm(1, 0)
+        myRelays.set_slow_pwm(2, 0)
+        sys.exit(0)
+
+if __name__ == '__main__':
+    runFanControl()
