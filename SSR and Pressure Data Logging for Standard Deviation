@@ -1,0 +1,100 @@
+from __future__ import print_function
+import qwiic_relay
+import smbus  # Import the smbus library for I2C communication
+import time  # Import the time library to handle delays and timestamps
+import logging  # Import the logging library to log data
+import threading  # Import threading for concurrent execution
+import sys  # Import sys for system-specific functions
+
+# Relay Initialization
+DUAL_SOLID_STATE_RELAY = 0x0B  # I2C address for the relay
+myRelays = qwiic_relay.QwiicRelay(DUAL_SOLID_STATE_RELAY)
+
+# I2C Pressure Sensor Initialization
+bus = smbus.SMBus(1)  # Initialize the I2C bus (bus number 1)
+address = 0x25  # I2C address of the SDP810 sensor
+
+# Logging Configuration
+logging.basicConfig(
+    level=logging.INFO,  # Set logging level to INFO. It will log messages of this level and higher.
+    format="%(asctime)s [%(levelname)s]: Data=%(message)s, Unix Time=%(unix_time)s",  # Define log message format.
+    datefmt="%Y-%m-%d %H:%M:%S",  # Specify date format.
+    filename="SDP810StandardDeviationData1.log",  # Log file name where messages will be stored.
+    filemode="a"  # Append new logs to the existing file.
+)
+
+def log_data_value(data_value):
+    """
+    Log the pressure data value along with the Unix timestamp.
+    """
+    unix_time = int(time.time())  # Get the current Unix time (seconds since epoch).
+    logging.info(data_value, extra={"unix_time": unix_time})  # Log the pressure value with Unix time.
+
+def read_pressure_sensor():
+    """
+    Continuously read pressure data from the sensor and log it.
+    """
+    # Start continuous measurement and configure the sensor
+    bus.write_i2c_block_data(address, 0x3F, [0xF9])
+    time.sleep(0.8)
+    bus.write_i2c_block_data(address, 0x36, [0x03])
+
+    while True:
+        time.sleep(0.5)  # Delay between sensor readings
+        try:
+            reading = bus.read_i2c_block_data(address, 0, 9)  # Read 9 bytes from the sensor
+            pressure_value = reading[0] + float(reading[1]) / 255  # Calculate pressure value
+
+            # Determine the differential pressure
+            if pressure_value >= 0 and pressure_value < 128:
+                differential_pressure = pressure_value * 240 / 256
+            elif pressure_value > 128 and pressure_value <= 256:
+                differential_pressure = -(256 - pressure_value) * 240 / 256
+            elif pressure_value == 128:
+                differential_pressure = 99999999  # Outlier/error value
+
+            # Log the pressure value
+            log_data_value(differential_pressure)
+
+        except Exception as e:
+            print(f"Error reading sensor: {e}")
+
+def control_relay():
+    """
+    Control the relay based on user input.
+    """
+    print("\nRelay Control Active - Type 'on' to turn relay 1 on and 'off' to turn it off\n")
+
+    if not myRelays.begin():
+        print("The Qwiic Relay isn't connected to the system. Please check your connection.", file=sys.stderr)
+        return
+
+    while True:
+        user_input = input("Enter 'on' to turn relay 1 on, 'off' to turn it off, or 'exit' to quit: ").strip().lower()
+        if user_input == 'on':
+            myRelays.set_relay_on(1)
+            print("Relay 1 is now ON.")
+        elif user_input == 'off':
+            myRelays.set_relay_off(1)
+            print("Relay 1 is now OFF.")
+        elif user_input == 'exit':
+            myRelays.set_relay_off(1)
+            print("Exiting relay control.")
+            break
+        else:
+            print("Invalid input. Please enter 'on', 'off', or 'exit'.")
+
+if __name__ == '__main__':
+    try:
+        # Start the pressure sensor logging in a separate thread
+        sensor_thread = threading.Thread(target=read_pressure_sensor)
+        sensor_thread.daemon = True  # Set as daemon so it exits when main program exits
+        sensor_thread.start()
+
+        # Run the relay control in the main thread
+        control_relay()
+
+    except (KeyboardInterrupt, SystemExit):
+        print("\nEnding program...")
+        myRelays.set_relay_off(1)  # Ensure relay is turned off before exiting
+        sys.exit(0)
