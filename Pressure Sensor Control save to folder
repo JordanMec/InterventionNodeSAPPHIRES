@@ -1,0 +1,62 @@
+import smbus  # Import the smbus library for I2C communication
+import time  # Import the time library to handle delays and timestamps
+import logging  # Import the logging library to log data
+
+# Configure the logging settings. This sets up the format and destination for log messages.
+logging.basicConfig(
+    level=logging.INFO,  # Set logging level to INFO. It will log messages of this level and higher.
+    format="%(asctime)s [%(levelname)s]: Data=%(message)s, Unix Time=%(unix_time)s",  # Define log message format with timestamp, log level, and data.
+    datefmt="%Y-%m-%d %H:%M:%S",  # Specify date format.
+    filename="SDP810test.log",  # Log file name where messages will be stored.
+    filemode="a"  # Append new logs to the existing file. Use 'w' to overwrite each time.
+)
+
+# Function to log the pressure data value along with the Unix timestamp.
+def log_data_value(data_value):
+    unix_time = int(time.time())  # Get the current Unix time (seconds since epoch).
+    logging.info(data_value, extra={"unix_time": unix_time})  # Log the pressure value with additional data (Unix time).
+
+# Initialize the I2C bus (bus number 1). This bus is used to communicate with the sensor.
+bus = smbus.SMBus(1)
+
+# The I2C address of the SDP810 sensor. This is the hardware address of the device.
+address = 0x25
+
+# Sending a command to the sensor to start continuous measurement.
+# 0x3F and 0xF9 are specific commands required to configure the sensor.
+bus.write_i2c_block_data(address, 0x3F, [0xF9])
+
+# Short delay to ensure the sensor is ready for measurement.
+time.sleep(0.8)
+
+# Sending a command to the sensor to set up a specific measurement configuration.
+# 0x36 and 0x03 are configuration commands.
+bus.write_i2c_block_data(address, 0x36, [0x03])
+
+# Infinite loop to continuously read pressure data from the sensor.
+while True:
+    # Wait for 0.5 seconds before reading the sensor again.
+    # Adjust the sleep time based on the desired read frequency.
+    time.sleep(0.5)
+
+    # Reading 9 bytes of data from the sensor starting at register 0.
+    # This data includes the pressure reading in a specific format.
+    reading = bus.read_i2c_block_data(address, 0, 9)
+
+    # Calculate the pressure value from the sensor data.
+    # Combine the first two bytes of data and normalize with 255 for precision.
+    pressure_value = reading[0] + float(reading[1]) / 255
+
+    # Determine the differential pressure based on the pressure value range.
+    if pressure_value >= 0 and pressure_value < 128:
+        # For positive pressure values in the range [0, 128).
+        differential_pressure = pressure_value * 240 / 256
+    elif pressure_value > 128 and pressure_value <= 256:
+        # For negative pressure values in the range (128, 256].
+        differential_pressure = -(256 - pressure_value) * 240 / 256
+    elif pressure_value == 128:
+        # If the pressure value is exactly 128, log an outlier/error.
+        differential_pressure = 99999999
+
+    # Log the calculated differential pressure value.
+    log_data_value(differential_pressure)
