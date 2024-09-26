@@ -1,0 +1,54 @@
+import smbus
+import time
+import logging
+
+# Configure the logging settings
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s]: Data=%(message)s, Unix Time=%(unix_time)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    filename="SDP810test.log",
+    filemode="a"
+)
+
+# Function to log the pressure data value along with the Unix timestamp
+def log_data_value(data_value):
+    unix_time = int(time.time())  # Get the current Unix time (seconds since epoch)
+    logging.info(data_value, extra={"unix_time": unix_time})  # Log the pressure value with Unix time
+
+# Initialize the I2C bus (bus number 1) for communication with the sensor
+bus = smbus.SMBus(1)
+
+# The I2C address of the SDP810 sensor
+address = 0x25
+
+# Sending command to start continuous measurement
+bus.write_i2c_block_data(address, 0x3F, [0xF9])
+time.sleep(0.8)  # Ensure sensor is ready for measurement
+
+# Setting up specific measurement configuration
+bus.write_i2c_block_data(address, 0x36, [0x03])
+
+# Infinite loop to continuously read and display pressure data from the sensor
+while True:
+    time.sleep(0.5)  # Adjust sleep time as needed for desired read frequency
+
+    # Read 9 bytes of data from the sensor starting at register 0
+    reading = bus.read_i2c_block_data(address, 0, 9)
+
+    # Calculate the pressure value from the sensor data
+    pressure_value = reading[0] + float(reading[1]) / 255
+
+    # Determine the differential pressure based on the pressure value range
+    if pressure_value >= 0 and pressure_value < 128:
+        differential_pressure = pressure_value * 240 / 256
+    elif pressure_value > 128 and pressure_value <= 256:
+        differential_pressure = -(256 - pressure_value) * 240 / 256
+    elif pressure_value == 128:
+        differential_pressure = 99999999  # Special outlier/error value
+
+    # Log the differential pressure value
+    log_data_value(differential_pressure)
+    
+    # Print the pressure value to the command screen
+    print(f"Differential Pressure: {differential_pressure} Pa")
