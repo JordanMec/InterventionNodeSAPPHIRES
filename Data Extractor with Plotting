@@ -1,0 +1,104 @@
+% Define the file name
+file_name = 'FullPressureDataSet.txt';
+
+% Read the content of the file into a string
+file_content = fileread(file_name);
+
+% Extract Data and Unix Time values using regular expressions
+data_values = regexp(file_content, 'Data=([\d.]+)', 'tokens');
+unix_time_values = regexp(file_content, 'Unix Time=([\d.]+)', 'tokens');
+
+% Convert the cell array of tokens into numerical arrays
+data_values = str2double([data_values{:}]);
+unix_time_values = str2double([unix_time_values{:}]);
+
+% Check if the lengths of the arrays are the same
+if length(data_values) == length(unix_time_values)
+    % Define number of intervals and interval duration in seconds
+    num_intervals = 10;
+    interval_duration = 30;  % 30 seconds
+    
+    % Define the exclusion periods (first 5 seconds and last 5 seconds)
+    exclusion_start = 5;  % Exclude first 5 seconds
+    exclusion_end = 5;    % Exclude last 5 seconds
+    
+    % Determine the start time of the entire dataset
+    start_time = min(unix_time_values);
+    
+    % Calculate elapsed time in seconds relative to the start time
+    elapsed_time = (unix_time_values - start_time) * 0.5;
+    
+    % Generate adjusted intervals matrix based on the number of intervals and duration
+    intervals = zeros(num_intervals, 2);
+    for i = 1:num_intervals
+        % Exclude the first 5 seconds and last 5 seconds of each 30-second interval
+        intervals(i, 1) = (i-1) * interval_duration * 0.5 + exclusion_start;  % Adjusted start time of interval
+        intervals(i, 2) = i * interval_duration * 0.5 - exclusion_end - 0.5;  % Adjusted end time of interval
+    end
+    
+    % Initialize an array to store standard deviations for each interval
+    std_devs = zeros(size(intervals, 1), 1);
+    
+    % Calculate standard deviation for each adjusted interval
+    for i = 1:size(intervals, 1)
+        % Get start and end time for the current adjusted interval in Unix Time
+        start_time_interval = start_time + (intervals(i, 1) / 0.5);
+        end_time_interval = start_time + (intervals(i, 2) / 0.5);
+        
+        % Filter Data values within the current adjusted interval
+        data_in_interval = data_values(unix_time_values >= start_time_interval & unix_time_values <= end_time_interval);
+        
+        % Calculate the standard deviation if there are values in the interval
+        if ~isempty(data_in_interval)
+            std_devs(i) = std(data_in_interval);
+        else
+            std_devs(i) = NaN;  % No data in this interval
+        end
+    end
+    
+    % Display the standard deviations for each adjusted interval
+    fprintf('Standard Deviations for each interval (excluding first and last 5 seconds):\n');
+    for i = 1:size(intervals, 1)
+        fprintf('Interval %d [%.1f, %.1f]: %.4f\n', i, intervals(i, 1), intervals(i, 2), std_devs(i));
+    end
+    
+    % Plot Data values against elapsed time using dots without connecting lines
+    figure;
+    subplot(2, 1, 1);  % Create a subplot for the scatter plot
+    plot(elapsed_time, data_values, 'k.', 'MarkerSize', 10);
+    
+    % Add labels and title for the scatter plot
+    xlabel('Elapsed Time (seconds)');
+    ylabel('Data Values');
+    title('Scatter Plot of Data Values against Elapsed Time');
+    xticks(0:0.5:max(elapsed_time));  % Set x-axis ticks at 0.5 second intervals
+    grid on;
+    
+    % Shade the areas between intervals and add vertical lines
+    hold on;
+    for i = 1:num_intervals
+        % Shade the interval area
+        x_patch = [intervals(i, 1), intervals(i, 1), intervals(i, 2), intervals(i, 2)];
+        y_patch = [min(data_values), max(data_values), max(data_values), min(data_values)];
+        patch(x_patch, y_patch, 'blue', 'FaceAlpha', 0.1, 'EdgeColor', 'none');
+        
+        % Draw vertical lines at the start and end of each interval
+        line([intervals(i, 1), intervals(i, 1)], [min(data_values), max(data_values)], 'Color', 'red', 'LineStyle', '--', 'LineWidth', 1);
+        line([intervals(i, 2), intervals(i, 2)], [min(data_values), max(data_values)], 'Color', 'red', 'LineStyle', '--', 'LineWidth', 1);
+    end
+    hold off;
+    
+    % Plot the standard deviations for each adjusted interval
+    subplot(2, 1, 2);  % Create a subplot for the standard deviation plot
+    bar(1:num_intervals, std_devs, 'FaceColor', 'b');
+    
+    % Add labels and title for the standard deviation plot
+    xlabel('Time Interval (1-10)');
+    ylabel('Standard Deviation');
+    title('Standard Deviation for Each Adjusted Time Interval');
+    xticks(1:num_intervals);  % Set x-axis ticks for intervals
+    grid on;
+else
+    % Display an error if lengths don't match
+    error('Mismatch between the number of Data values and Unix Time values.');
+end
