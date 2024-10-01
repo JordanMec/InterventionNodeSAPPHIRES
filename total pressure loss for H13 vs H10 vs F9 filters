@@ -1,0 +1,137 @@
+function plot_total_pressure_loss_with_power_law()
+    % Given values for duct
+    lambda = 0.016; % Darcy-Weisbach friction coefficient (dimensionless)
+    L = 130; % Length of the duct or pipe (ft)
+    D_h_inches = 10; % Diameter of the duct in inches (use 10" or 8" ducts depending on needs)
+    D_h = D_h_inches / 12; % Convert hydraulic diameter from inches to feet (1 foot = 12 inches)
+    rho_f = 0.0399; % Density of the fluid (air) in Denver at 70*F
+    
+    % Given values for power law equation for two scenarios
+    C_tight = 78.6; % C value for "Tight Home" scenario
+    C_leaky = 314.6; % C value for "Leaky Home" scenario
+    n = 0.65; % Exponent for the power law equation (same for both scenarios)
+    
+    % Conversion factors
+    CFM_to_ft3ps = 1 / 60; % Conversion factor: 1 CFM = 1/60 ft^3/s
+    psf_to_inH2O = 0.192; % Conversion factor: 1 psf = 0.192 inH2O
+    
+    % Define a range of flow rates (CFM) from 0 to 1300
+    flow_rate_CFM = linspace(0, 1300, 100); % 100 evenly spaced points between 0 and 1300 CFM
+    
+    % Pre-allocate arrays to store results for H13, H10, and F9 filters
+    total_pressure_drop_tight_H13_inH2O = zeros(size(flow_rate_CFM)); % Tight Home, H13 filter
+    total_pressure_drop_leaky_H13_inH2O = zeros(size(flow_rate_CFM)); % Leaky Home, H13 filter
+    total_pressure_drop_tight_H10_inH2O = zeros(size(flow_rate_CFM)); % Tight Home, H10 filter
+    total_pressure_drop_leaky_H10_inH2O = zeros(size(flow_rate_CFM)); % Leaky Home, H10 filter
+    total_pressure_drop_tight_F9_inH2O = zeros(size(flow_rate_CFM));  % Tight Home, F9 filter
+    total_pressure_drop_leaky_F9_inH2O = zeros(size(flow_rate_CFM));  % Leaky Home, F9 filter
+    
+    % Iterate over each flow rate to calculate pressure drops
+    for i = 1:length(flow_rate_CFM)
+        % Current flow rate in cubic feet per second (ft^3/s)
+        Q_ft3ps = flow_rate_CFM(i) * CFM_to_ft3ps;
+        
+        % Calculate the cross-sectional area of the duct (in ft^2) using the 10-inch diameter
+        A_d = pi / 4 * D_h^2; % Area = pi/4 * D_h^2, where D_h is in feet
+        
+        % Calculate the velocity of the fluid in the duct (in ft/s)
+        v = Q_ft3ps / A_d;
+        
+        % Calculate major pressure loss in the duct using the Darcy-Weisbach equation
+        delta_p_major = lambda * (L / D_h) * (rho_f * v^2 / 2); % Pressure loss in psf (lb/ft^2)
+        
+        % Convert duct pressure loss from psf to inches of water column (inH2O)
+        duct_pressure_loss_inH2O = delta_p_major * psf_to_inH2O;
+        
+        % Filter pressure drop for H13 HEPA filter (0.004878 inH2O/CFM)
+        filter_pressure_drop_H13_inH2O = 0.004878 * flow_rate_CFM(i);
+        
+        % Filter pressure drop for H10 HEPA filter (0.0027 inH2O/CFM)
+        filter_pressure_drop_H10_inH2O = 0.0027 * flow_rate_CFM(i);
+        
+        % Filter pressure drop for F9 filter (0.0023 inH2O/CFM)
+        filter_pressure_drop_F9_inH2O = 0.0023 * flow_rate_CFM(i);
+        
+        % Power law pressure drop for Tight Home
+        power_law_pressure_drop_tight_inH2O = (flow_rate_CFM(i) / C_tight)^(1/n);
+        
+        % Power law pressure drop for Leaky Home
+        power_law_pressure_drop_leaky_inH2O = (flow_rate_CFM(i) / C_leaky)^(1/n);
+        
+        % Calculate total pressure drop for Tight Home (H13 filter)
+        total_pressure_drop_tight_H13_inH2O(i) = duct_pressure_loss_inH2O + ...
+                                                 filter_pressure_drop_H13_inH2O + ...
+                                                 power_law_pressure_drop_tight_inH2O;
+        
+        % Calculate total pressure drop for Leaky Home (H13 filter)
+        total_pressure_drop_leaky_H13_inH2O(i) = duct_pressure_loss_inH2O + ...
+                                                 filter_pressure_drop_H13_inH2O + ...
+                                                 power_law_pressure_drop_leaky_inH2O;
+        
+        % Calculate total pressure drop for Tight Home (H10 filter)
+        total_pressure_drop_tight_H10_inH2O(i) = duct_pressure_loss_inH2O + ...
+                                                 filter_pressure_drop_H10_inH2O + ...
+                                                 power_law_pressure_drop_tight_inH2O;
+        
+        % Calculate total pressure drop for Leaky Home (H10 filter)
+        total_pressure_drop_leaky_H10_inH2O(i) = duct_pressure_loss_inH2O + ...
+                                                 filter_pressure_drop_H10_inH2O + ...
+                                                 power_law_pressure_drop_leaky_inH2O;
+        
+        % Calculate total pressure drop for Tight Home (F9 filter)
+        total_pressure_drop_tight_F9_inH2O(i) = duct_pressure_loss_inH2O + ...
+                                                filter_pressure_drop_F9_inH2O + ...
+                                                power_law_pressure_drop_tight_inH2O;
+        
+        % Calculate total pressure drop for Leaky Home (F9 filter)
+        total_pressure_drop_leaky_F9_inH2O(i) = duct_pressure_loss_inH2O + ...
+                                                filter_pressure_drop_F9_inH2O + ...
+                                                power_law_pressure_drop_leaky_inH2O;
+    end
+    
+    % Plot the results for both scenarios
+    figure; % Create a new figure for plotting
+    plot(flow_rate_CFM, total_pressure_drop_tight_H13_inH2O, 'b-', 'LineWidth', 2); % Tight Home, H13 filter
+    hold on; % Keep the plot active to overlay the next plot
+    plot(flow_rate_CFM, total_pressure_drop_leaky_H13_inH2O, 'r-', 'LineWidth', 2); % Leaky Home, H13 filter
+    
+    % Plot the results for the H10 filter scenarios
+    plot(flow_rate_CFM, total_pressure_drop_tight_H10_inH2O, 'k-', 'LineWidth', 2); % Tight Home, H10 filter (Black)
+    plot(flow_rate_CFM, total_pressure_drop_leaky_H10_inH2O, 'y-', 'LineWidth', 2); % Leaky Home, H10 filter (Yellow)
+    
+    % Shade the area between the black (Tight Home H10) and yellow (Leaky Home H10) lines
+    fill([flow_rate_CFM, fliplr(flow_rate_CFM)], ...
+         [total_pressure_drop_tight_H10_inH2O, fliplr(total_pressure_drop_leaky_H10_inH2O)], ...
+         [0.9, 0.9, 0], 'FaceAlpha', 0.3, 'EdgeColor', 'none'); % Yellowish shading with transparency
+    
+    % Plot the results for the F9 filter scenarios
+    plot(flow_rate_CFM, total_pressure_drop_tight_F9_inH2O, 'g-', 'LineWidth', 2); % Tight Home, F9 filter (Green)
+    plot(flow_rate_CFM, total_pressure_drop_leaky_F9_inH2O, 'c-', 'LineWidth', 2); % Leaky Home, F9 filter (Cyan)
+    
+    % Shade the area between the green (Tight Home F9) and cyan (Leaky Home F9) lines
+    fill([flow_rate_CFM, fliplr(flow_rate_CFM)], ...
+         [total_pressure_drop_tight_F9_inH2O, fliplr(total_pressure_drop_leaky_F9_inH2O)], ...
+         [0, 1, 1], 'FaceAlpha', 0.3, 'EdgeColor', 'none'); % Cyanish shading with transparency
+    
+    % Labels and title
+    xlabel('Volumetric Flow Rate (CFM)'); % Label for x-axis
+    ylabel('Pressure Loss (inH2O)'); % Label for y-axis
+    title('Total Pressure Drop vs. Volumetric Flow Rate for Different Homes and Filters'); % Title of the plot
+    grid on; % Add grid to the plot for better visualization
+    
+    % Set the axis limits to limit the pressure loss to a maximum of 10
+    axis([0 1100 0 4]); % [xmin xmax ymin ymax]
+    
+    % Update legend to include all data series
+    legend('Tight Home (H13)', 'Leaky Home (H13)', ...
+           'Tight Home (H10)', 'Leaky Home (H10)', 'Shaded Area (H10)', ...
+           'Tight Home (F9)', 'Leaky Home (F9)', 'Shaded Area (F9)');
+    
+    % Display the maximum total pressure drop for both scenarios in the command window
+    fprintf('Maximum Total Pressure Drop for Tight Home (H13): %.4f inH2O\n', max(total_pressure_drop_tight_H13_inH2O));
+    fprintf('Maximum Total Pressure Drop for Leaky Home (H13): %.4f inH2O\n', max(total_pressure_drop_leaky_H13_inH2O));
+    fprintf('Maximum Total Pressure Drop for Tight Home (H10): %.4f inH2O\n', max(total_pressure_drop_tight_H10_inH2O));
+    fprintf('Maximum Total Pressure Drop for Leaky Home (H10): %.4f inH2O\n', max(total_pressure_drop_leaky_H10_inH2O));
+    fprintf('Maximum Total Pressure Drop for Tight Home (F9): %.4f inH2O\n', max(total_pressure_drop_tight_F9_inH2O));
+    fprintf('Maximum Total Pressure Drop for Leaky Home (F9): %.4f inH2O\n', max(total_pressure_drop_leaky_F9_inH2O));
+end
