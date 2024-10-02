@@ -1,0 +1,171 @@
+function plot_total_pressure_loss_with_sliders()
+    % Initial given values
+    lambda = 0.016; % Darcy-Weisbach friction coefficient (dimensionless)
+    D_h_inches = 10; % Diameter of the duct in inches (use 10" or 8" ducts depending on needs)
+    D_h = D_h_inches / 12; % Convert hydraulic diameter from inches to feet (1 foot = 12 inches)
+    rho_f = 0.0399; % Density of the fluid (air) in Denver at 70°F
+    n = 0.65; % Exponent for the power law equation
+
+    % Conversion factors
+    CFM_to_ft3ps = 1 / 60; % Conversion factor: 1 CFM = 1/60 ft^3/s
+    psf_to_inH2O = 0.192; % Conversion factor: 1 psf = 0.192 inH2O
+    inH2O_to_Pa = 249.08891; % Conversion factor: 1 inH2O = 249.08891 Pa
+
+    % Define a range of flow rates (CFM) from 0 to 1300
+    flow_rate_CFM = linspace(0, 1300, 100); % 100 evenly spaced points between 0 and 1300 CFM
+
+    % Initialize variables for sliders
+    C_value = 100; % Initial C value (for the power law equation)
+    filter_pressure_drop = 0.0049; % Initial filter pressure drop in inH2O
+    L = 130; % Initial length of the duct in feet
+
+    % Initialize checkboxes states (all true by default)
+    use_duct_loss = true;
+    use_power_law = true;
+    use_filter_loss = true;
+
+    % Pre-allocate arrays for pressure drops
+    duct_pressure_loss_inH2O = zeros(size(flow_rate_CFM));
+    power_law_pressure_drop_inH2O = zeros(size(flow_rate_CFM));
+
+    % Create a figure for plotting
+    figure;
+
+    % Plot the initial placeholder for the dynamic line (pressure loss vs. flow rate)
+    h_plot = plot(flow_rate_CFM, zeros(size(flow_rate_CFM)), 'b-', 'LineWidth', 2, 'DisplayName', 'Pressure loss vs. Flow rate');
+    hold on;
+
+    % Superimpose the fixed line "10\" EC PrioAir" with its fixed points (upper range)
+    x_upper = [1237, 1156, 1079, 997, 900, 769, 118, 0]; % X-coordinates for upper range
+    y_upper = [0, 49.768, 99.536, 149.304, 199.072, 248.84, 373.26, 398.144]; % Y-coordinates for upper range
+    plot(x_upper, y_upper, 'm-', 'LineWidth', 2, 'DisplayName', '10" EC PrioAir (Upper Range)');
+
+    % Plot the lower range of the "10\" EC PrioAir" based on the given points
+    x_lower = [0, 200, 269, 318, 400, 500]; % X-coordinates for lower range
+    y_lower = [105, 58, 55, 56, 43, 12];   % Y-coordinates for lower range
+    plot(x_lower, y_lower, 'r-', 'LineWidth', 2, 'DisplayName', '10" EC PrioAir (Lower Range)');
+
+    % Fix for shading between the upper and lower ranges
+    % Fill the area between the two curves (shade the region between the upper and lower range)
+    x_fill = [x_upper, fliplr(x_lower)];   % Combine x-coordinates for the shaded area (upper to lower)
+    y_fill = [y_upper, fliplr(y_lower)];   % Combine y-coordinates for the shaded area (upper to lower)
+    fill(x_fill, y_fill, 'g', 'FaceAlpha', 0.3, 'EdgeColor', 'none', 'DisplayName', 'Fans Operational Range'); % Shade with green color and transparency
+
+    % Add a legend to label the lines
+    legend('Pressure loss vs. flow rate', '10" EC PrioAir (Upper Range)', '10" EC PrioAir (Lower Range)', 'Fans Operational Range', 'Location', 'northeast');
+
+    % Set axis labels and plot title
+    xlabel('Volumetric Flow Rate (CFM)');
+    ylabel('Pressure Loss (Pa)');
+    title('Total Pressure Drop vs. Volumetric Flow Rate (with adjustable parameters)');
+    grid on;
+    axis([0 1240 0 400]);
+
+    %% Sliders for dynamic adjustment
+    uicontrol('Style', 'slider', 'Min', 39.3, 'Max', 314.6, 'Value', C_value, ...
+        'Position', [20, 50, 120, 20], 'Callback', @(src, event) adjustCValue(src));
+
+    uicontrol('Style', 'slider', 'Min', 0.002, 'Max', 0.0049, 'Value', filter_pressure_drop, ...
+        'Position', [160, 50, 120, 20], 'Callback', @(src, event) adjustFilterPressure(src));
+
+    uicontrol('Style', 'slider', 'Min', 30, 'Max', 1000, 'Value', L, ...
+        'Position', [300, 50, 120, 20], 'Callback', @(src, event) adjustDuctLength(src));
+
+    % Labels for the sliders
+    uicontrol('Style', 'text', 'Position', [20, 70, 120, 20], 'String', 'C Value'); 
+    uicontrol('Style', 'text', 'Position', [160, 70, 120, 20], 'String', 'Filter Pressure Drop');
+    uicontrol('Style', 'text', 'Position', [300, 70, 120, 20], 'String', 'Duct Length (ft)');
+
+    %% Checkboxes for enabling/disabling the components
+    uicontrol('Style', 'checkbox', 'Position', [20, 100, 200, 20], 'String', 'Use Duct Pressure Loss', 'Value', use_duct_loss, ...
+        'Callback', @(src, event) toggleDuctLoss(src));
+
+    uicontrol('Style', 'checkbox', 'Position', [20, 120, 200, 20], 'String', 'Use Power Law Pressure Drop', 'Value', use_power_law, ...
+        'Callback', @(src, event) togglePowerLaw(src));
+
+    uicontrol('Style', 'checkbox', 'Position', [20, 140, 200, 20], 'String', 'Use Filter Pressure Drop', 'Value', use_filter_loss, ...
+        'Callback', @(src, event) toggleFilterLoss(src));
+
+    %% Recalculate and plot based on current slider values
+    function recalculate()
+        % Iterate over each flow rate to calculate the pressure drops
+        for i = 1:length(flow_rate_CFM)
+            % Current flow rate in cubic feet per second (ft^3/s)
+            Q_ft3ps = flow_rate_CFM(i) * CFM_to_ft3ps;
+
+            % Calculate the cross-sectional area of the duct (in ft^2)
+            A_d = pi / 4 * D_h^2;
+            % Calculate the velocity of the fluid in the duct (in ft/s)
+            v = Q_ft3ps / A_d;
+
+            % Calculate duct pressure loss
+            delta_p_major = lambda * (L / D_h) * (rho_f * v^2 / 2);
+            duct_pressure_loss_inH2O(i) = delta_p_major * psf_to_inH2O;
+
+            % Calculate power law pressure drop
+            power_law_pressure_drop_inH2O(i) = (flow_rate_CFM(i) / C_value)^(1/n);
+        end
+
+        % Initialize the total pressure drop with zeros
+        total_pressure_drop_inH2O = zeros(size(flow_rate_CFM));
+
+        % Add duct pressure loss if enabled
+        if use_duct_loss
+            total_pressure_drop_inH2O = total_pressure_drop_inH2O + duct_pressure_loss_inH2O;
+        end
+
+        % Add power law pressure drop if enabled
+        if use_power_law
+            total_pressure_drop_inH2O = total_pressure_drop_inH2O + power_law_pressure_drop_inH2O;
+        end
+
+        % Add filter pressure drop if enabled
+        if use_filter_loss
+            total_pressure_drop_inH2O = total_pressure_drop_inH2O + filter_pressure_drop * flow_rate_CFM;
+        end
+
+        % Convert to Pascals
+        total_pressure_drop_Pa = total_pressure_drop_inH2O * inH2O_to_Pa;
+
+        % Update the plot or hide it if all components are disabled
+        if use_duct_loss || use_power_law || use_filter_loss
+            set(h_plot, 'YData', total_pressure_drop_Pa, 'Visible', 'on');
+        else
+            set(h_plot, 'Visible', 'off'); % Hide the plot if all are turned off
+        end
+    end
+
+    %% Dynamic adjustment functions
+    function adjustCValue(src)
+        C_value = get(src, 'Value');
+        recalculate();
+    end
+
+    function adjustFilterPressure(src)
+        filter_pressure_drop = get(src, 'Value');
+        recalculate();
+    end
+
+    function adjustDuctLength(src)
+        L = get(src, 'Value');
+        recalculate();
+    end
+
+    %% Checkbox callback functions
+    function toggleDuctLoss(src)
+        use_duct_loss = get(src, 'Value');
+        recalculate();
+    end
+
+    function togglePowerLaw(src)
+        use_power_law = get(src, 'Value');
+        recalculate();
+    end
+
+    function toggleFilterLoss(src)
+        use_filter_loss = get(src, 'Value');
+        recalculate();
+    end
+
+    recalculate(); % Initial calculation and plotting
+end
