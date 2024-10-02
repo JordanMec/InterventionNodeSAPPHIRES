@@ -1,0 +1,118 @@
+function plot_total_pressure_loss_with_sliders()
+    % Initial given values
+    lambda = 0.016; % Darcy-Weisbach friction coefficient (dimensionless)
+    D_h_inches = 10; % Diameter of the duct in inches (use 10" or 8" ducts depending on needs)
+    D_h = D_h_inches / 12; % Convert hydraulic diameter from inches to feet (1 foot = 12 inches)
+    rho_f = 0.0399; % Density of the fluid (air) in Denver at 70°F
+    n = 0.65; % Exponent for the power law equation
+
+    % Conversion factors
+    CFM_to_ft3ps = 1 / 60; % Conversion factor: 1 CFM = 1/60 ft^3/s
+    psf_to_inH2O = 0.192; % Conversion factor: 1 psf = 0.192 inH2O
+    inH2O_to_Pa = 249.08891; % Conversion factor: 1 inH2O = 249.08891 Pa
+
+    % Define a range of flow rates (CFM) from 0 to 1300
+    flow_rate_CFM = linspace(0, 1300, 100); % 100 evenly spaced points between 0 and 1300 CFM
+
+    % Initialize variables for sliders
+    C_value = 100; % Initial C value (for the power law equation)
+    filter_pressure_drop = 0.0049; % Initial filter pressure drop in inH2O
+    L = 130; % Initial length of the duct in feet
+
+    % Pre-allocate arrays to store duct pressure and power law pressure drops
+    duct_pressure_loss_inH2O = zeros(size(flow_rate_CFM)); % Store duct pressure loss (in inches of water column)
+    power_law_pressure_drop_inH2O = zeros(size(flow_rate_CFM)); % Store power law pressure drop (in inches of water column)
+
+    % Create a figure for plotting
+    figure;
+    
+    % Plot the initial placeholder for the dynamic line (pressure loss vs. flow rate)
+    h_plot = plot(flow_rate_CFM, zeros(size(flow_rate_CFM)), 'b-', 'LineWidth', 2, 'DisplayName', 'Pressure loss vs. Flow rate');
+    hold on;
+
+    % Superimpose the fixed line "10\" EC PrioAir" with its fixed points
+    % These points won't change with the sliders
+    x = [1237, 1156, 1079, 997, 900, 769, 118, 0]; % X-coordinates
+    y = [0, 49.768, 99.536, 149.304, 199.072, 248.84, 373.26, 398.144]; % Y-coordinates
+    plot(x, y, 'm-', 'LineWidth', 2, 'DisplayName', '10" EC PrioAir'); % Plot the static line
+
+    % Add a legend to label the two lines
+    legend('Pressure loss vs. flow rate', '10" EC PrioAir', 'Location', 'northeast'); % Legend in the top right corner
+
+    % Set axis labels and plot title
+    xlabel('Volumetric Flow Rate (CFM)'); % Label for the x-axis (flow rate in CFM)
+    ylabel('Pressure Loss (Pa)'); % Label for the y-axis (pressure loss in Pascals)
+    title('Total Pressure Drop vs. Volumetric Flow Rate (with adjustable parameters)'); % Title of the plot
+    grid on; % Turn on the grid for better readability
+    axis([0 1300 0 500]); % Set axis limits: X-axis (0 to 1300 CFM), Y-axis (0 to 500 Pa)
+
+    %% Sliders for dynamic adjustment
+    % Slider for adjusting the C value (used in the power law equation)
+    uicontrol('Style', 'slider', 'Min', 39.3, 'Max', 314.6, 'Value', C_value, ...
+        'Position', [20, 50, 120, 20], 'Callback', @(src, event) adjustCValue(src)); % C value slider
+
+    % Slider for adjusting the filter pressure drop (affects the filter loss)
+    uicontrol('Style', 'slider', 'Min', 0.002, 'Max', 0.0049, 'Value', filter_pressure_drop, ...
+        'Position', [160, 50, 120, 20], 'Callback', @(src, event) adjustFilterPressure(src)); % Filter pressure drop slider
+
+    % Slider for adjusting the length of the duct (affects the duct loss)
+    uicontrol('Style', 'slider', 'Min', 10, 'Max', 1000, 'Value', L, ...
+        'Position', [300, 50, 120, 20], 'Callback', @(src, event) adjustDuctLength(src)); % Duct length slider
+
+    % Labels for the sliders
+    uicontrol('Style', 'text', 'Position', [20, 70, 120, 20], 'String', 'C Value'); % Label for C value slider
+    uicontrol('Style', 'text', 'Position', [160, 70, 120, 20], 'String', 'Filter Pressure Drop'); % Label for filter pressure drop slider
+    uicontrol('Style', 'text', 'Position', [300, 70, 120, 20], 'String', 'Duct Length (ft)'); % Label for duct length slider
+
+    %% Recalculate and plot based on current slider values
+    function recalculate()
+        % Iterate over each flow rate to calculate the pressure drops
+        for i = 1:length(flow_rate_CFM)
+            % Current flow rate in cubic feet per second (ft^3/s)
+            Q_ft3ps = flow_rate_CFM(i) * CFM_to_ft3ps;
+
+            % Calculate the cross-sectional area of the duct (in ft^2)
+            A_d = pi / 4 * D_h^2; % Area formula for a circle: A = pi/4 * D_h^2
+            
+            % Calculate the velocity of the fluid in the duct (in ft/s)
+            v = Q_ft3ps / A_d; % Velocity = Flow rate / Area
+
+            % Calculate major pressure loss in the duct using the Darcy-Weisbach equation
+            % delta_p_major = lambda * (L / D_h) * (rho_f * v^2 / 2)
+            delta_p_major = lambda * (L / D_h) * (rho_f * v^2 / 2); % Pressure loss in psf (lb/ft^2)
+            duct_pressure_loss_inH2O(i) = delta_p_major * psf_to_inH2O; % Convert to inches of water column
+
+            % Calculate power law pressure drop (dependent on flow rate and C value)
+            power_law_pressure_drop_inH2O(i) = (flow_rate_CFM(i) / C_value)^(1/n); % Power law equation
+        end
+
+        % Calculate total pressure drop in Pascals
+        % Total pressure drop = duct loss + power law loss + filter loss
+        total_pressure_drop_Pa = (duct_pressure_loss_inH2O + power_law_pressure_drop_inH2O + filter_pressure_drop * flow_rate_CFM) * inH2O_to_Pa;
+        
+        % Update the plot data for the dynamic line (pressure loss vs. flow rate)
+        set(h_plot, 'YData', total_pressure_drop_Pa);
+    end
+
+    %% Dynamic adjustment functions
+    % Adjust C value dynamically
+    function adjustCValue(src)
+        C_value = get(src, 'Value'); % Get the current value of the slider
+        recalculate(); % Recalculate the total pressure drop and update the plot
+    end
+
+    % Adjust filter pressure drop dynamically
+    function adjustFilterPressure(src)
+        filter_pressure_drop = get(src, 'Value'); % Get the current value of the slider
+        recalculate(); % Recalculate the total pressure drop and update the plot
+    end
+
+    % Adjust duct length (L) dynamically
+    function adjustDuctLength(src)
+        L = get(src, 'Value'); % Get the current value of the slider
+        recalculate(); % Recalculate the total pressure drop and update the plot
+    end
+
+    % Perform the initial calculation and plot the data for the first time
+    recalculate(); % Initial calculation and plotting
+end
