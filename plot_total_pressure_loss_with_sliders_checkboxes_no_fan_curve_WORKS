@@ -1,0 +1,146 @@
+function plot_total_pressure_loss_with_sliders_checkboxes_fixed_axes()
+    % Clear previous variables and close figures
+    clear;
+    clc;
+    close all;
+
+    %% Given parameters
+    n = 0.65; % Exponent for the Homes pressure loss equation
+    D_h_inches = 10; % Diameter of the duct in inches (use 10" or 8" ducts depending on needs)
+
+
+    % Define a range of flow rates (CFM) from 0 to 1300
+    flow_rate_CFM = linspace(0, 1300, 100); % 100 evenly spaced points between 0 and 1300 CFM
+
+    % Initialize variables for sliders
+    C_value = 78.6; % Initial C value (for the Homes pressure loss equation)
+    filter_pressure_drop = 0.0049; % Initial filter pressure drop in inH2O
+    L = 130; % Initial length of the duct in feet
+
+    % Initialize checkboxes states
+    use_duct_loss = false;
+    use_homes_loss = true;
+    use_filter_loss = false;
+
+    % Create a figure for the total pressure loss plot
+    fig = figure('Name', 'Total Pressure Loss vs Flow Rate', 'NumberTitle', 'off');
+
+    % Create axes for the total pressure loss plot
+    ax_total = axes('Parent', fig, 'Position', [0.13 0.3 0.775 0.6]);
+    hold(ax_total, 'on');
+
+    % Set labels, title, and grid for the total pressure loss plot
+    xlabel(ax_total, 'Flow Rate (Q) [CFM]');
+    ylabel(ax_total, 'Pressure (P) [Pa]');
+    title(ax_total, 'Total Pressure Loss vs Flow Rate');
+    grid(ax_total, 'on');
+
+    % Set fixed axis limits for the plot
+    xlim(ax_total, [0 1300]); % Fix X-axis (Flow Rate) from 0 to 1300 CFM
+    ylim(ax_total, [0 400]);  % Fix Y-axis (Pressure Loss) from 0 to 400 Pa (adjust based on max values)
+
+    % Create a plot for total pressure loss
+    total_plot = plot(flow_rate_CFM, zeros(size(flow_rate_CFM)), 'b-', 'LineWidth', 2, 'DisplayName', 'Total Pressure Loss');
+
+    % Add a legend to label the lines
+    legend(ax_total, 'show');
+
+    %% Sliders for dynamic adjustment (C value, filter pressure drop, duct length)
+    % Slider for Adjust C Value
+    uicontrol('Style', 'text', 'Position', [350, 50, 100, 20], 'String', 'Adjust C');
+    slider_C = uicontrol('Style', 'slider', ...
+        'Min', 39, 'Max', 315, 'Value', C_value, ...
+        'Position', [200, 20, 300, 20], ...
+        'Callback', @(src, event) updatePlot());
+
+    % Slider for Filter Pressure Drop
+    uicontrol('Style', 'text', 'Position', [350, 100, 100, 20], 'String', 'Filter Pressure Drop');
+    slider_filter = uicontrol('Style', 'slider', ...
+        'Min', 0.002, 'Max', 0.0049, 'Value', filter_pressure_drop, ...
+        'Position', [200, 80, 300, 20], ...
+        'Callback', @(src, event) updatePlot());
+
+    % Slider for Duct Length
+    uicontrol('Style', 'text', 'Position', [350, 150, 100, 20], 'String', 'Duct Length');
+    slider_length = uicontrol('Style', 'slider', ...
+        'Min', 30, 'Max', 600, 'Value', L, ...
+        'Position', [200, 130, 300, 20], ...
+        'Callback', @(src, event) updatePlot());
+
+    % Labels to display the values of sliders
+    label_C = uicontrol('Style', 'text', 'Position', [510, 20, 50, 20], 'String', ['C: ' num2str(C_value)]);
+    label_filter = uicontrol('Style', 'text', 'Position', [510, 80, 100, 20], 'String', ['Filter: ' num2str(filter_pressure_drop, '%.4f') ' inH2O']);
+    label_length = uicontrol('Style', 'text', 'Position', [510, 130, 100, 20], 'String', ['Length: ' num2str(L) ' ft']);
+
+    %% Checkboxes for enabling/disabling the components
+    uicontrol('Style', 'checkbox', 'Position', [20, 200, 200, 20], 'String', 'Use Duct Pressure Loss', 'Value', use_duct_loss, ...
+        'Callback', @(src, event) toggleDuctLoss(src));
+
+    uicontrol('Style', 'checkbox', 'Position', [20, 230, 200, 20], 'String', 'Use Homes Pressure Loss', 'Value', use_homes_loss, ...
+        'Callback', @(src, event) toggleHomesLoss(src));
+
+    uicontrol('Style', 'checkbox', 'Position', [20, 260, 200, 20], 'String', 'Use Filter Pressure Drop', 'Value', use_filter_loss, ...
+        'Callback', @(src, event) toggleFilterLoss(src));
+
+    %% Function to update the total pressure loss plot dynamically
+    function updatePlot()
+        % Get current slider values
+        C_value = get(slider_C, 'Value');
+        filter_pressure_drop = get(slider_filter, 'Value');
+        L = get(slider_length, 'Value');
+
+        % Update the labels to display the current values of sliders
+        set(label_C, 'String', ['C: ' num2str(round(C_value))]);
+        set(label_filter, 'String', ['Filter: ' num2str(filter_pressure_drop, '%.4f') ' inH2O']);
+        set(label_length, 'String', ['Length: ' num2str(round(L)) ' ft']);
+
+        % Initialize the total pressure drop
+        total_pressure_drop_Pa = zeros(size(flow_rate_CFM));
+
+        % Calculate duct pressure loss using the new equation (scaled by length)
+        duct_pressure_loss_Pa = 0.2717287 * (flow_rate_CFM.^1.9) ./ (D_h_inches.^5.02) * L;
+
+        % Update the homes pressure loss using the dynamic equation
+        homes_pressure_loss_Pa = (flow_rate_CFM / C_value).^(1/n);
+
+        % Add duct pressure loss if enabled
+        if use_duct_loss
+            total_pressure_drop_Pa = total_pressure_drop_Pa + duct_pressure_loss_Pa;
+        end
+
+        % Add Homes pressure loss if enabled
+        if use_homes_loss
+            total_pressure_drop_Pa = total_pressure_drop_Pa + homes_pressure_loss_Pa;
+        end
+
+        % Add filter pressure drop if enabled
+        if use_filter_loss
+            filter_pressure_drop_Pa = filter_pressure_drop;
+            total_pressure_drop_Pa = total_pressure_drop_Pa + filter_pressure_drop_Pa * flow_rate_CFM;
+        end
+        
+        set(total_plot, 'YData', total_pressure_drop_Pa);  % Update total pressure plot
+
+        % Redraw the plot
+        drawnow;
+    end
+
+    %% Checkbox callback functions
+    function toggleDuctLoss(src)
+        use_duct_loss = get(src, 'Value');
+        updatePlot();
+    end
+
+    function toggleHomesLoss(src)
+        use_homes_loss = get(src, 'Value');
+        updatePlot();
+    end
+
+    function toggleFilterLoss(src)
+        use_filter_loss = get(src, 'Value');
+        updatePlot();
+    end
+
+    % Initial calculation and plotting
+    updatePlot();
+end
