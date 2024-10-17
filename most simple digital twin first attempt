@@ -1,0 +1,117 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import tkinter as tk
+
+# Simulation duration and timestep
+duration = 60  # 60 seconds total (30 sec increase, 30 sec decrease)
+timestep = 0.1  # 100 ms timestep
+time_values = np.arange(0, duration, timestep)  # Time array
+
+# Constants
+n = 0.65
+D_h_inches = 10  # Duct diameter in inches
+C_value = 78.6
+filter_pressure_drop = 1.2136
+L = 130  # Duct length in feet
+
+
+# Function to compute the blower power (wattage) at time t (sinusoidal function)
+def blower_power(t):
+    return 150 * (1 - np.cos(np.pi * t / 30))  # Sinusoidal from 0W to 300W over 60s
+
+
+# Function to compute the flow rate (CFM) at time t based on blower power
+def flow_rate_from_power(t):
+    power = blower_power(t)  # Power in watts
+    return (power / 300) * 250  # Linear relation: 0W = 0CFM, 300W = 250CFM
+
+
+# Create the main window
+root = tk.Tk()
+root.title("Blower Fan Simulation: Pressure Loss, Flow Rate, and Wattage vs Time")
+
+# Create a figure with 6 subplots (3x2 grid)
+fig, axs = plt.subplots(3, 2, figsize=(12, 10))
+(ax_flow_rate, ax_wattage), (ax_duct, ax_homes), (ax_filter, ax_total) = axs
+
+# Set common labels, titles, and grid for all subplots
+for ax in axs.flat:
+    ax.set_xlim([0, duration])
+    ax.grid(True)
+
+# Set titles for each subplot
+ax_flow_rate.set_title('Blower Fan Flow Rate (CFM)')
+ax_wattage.set_title('Blower Fan Wattage (Watts)')
+ax_duct.set_title('Duct Pressure Loss')
+ax_homes.set_title('Home Pressure Loss')
+ax_filter.set_title('Filter Pressure Drop')
+ax_total.set_title('Total Pressure Loss')
+
+# Set y-axis limits
+ax_flow_rate.set_ylim([0, 250])  # Flow rate between 0 and 250 CFM
+ax_wattage.set_ylim([0, 300])  # Wattage between 0 and 300 Watts
+ax_duct.set_ylim([0, 400])  # Pressure loss between 0 and 400 Pa
+ax_homes.set_ylim([0, 400])
+ax_filter.set_ylim([0, 400])
+ax_total.set_ylim([0, 400])
+
+# Create initial plots (empty for now)
+flow_rate_plot, = ax_flow_rate.plot(time_values, np.zeros_like(time_values), 'c-', linewidth=2)
+wattage_plot, = ax_wattage.plot(time_values, np.zeros_like(time_values), 'm-', linewidth=2)
+duct_plot, = ax_duct.plot(time_values, np.zeros_like(time_values), 'b-', linewidth=2)
+homes_plot, = ax_homes.plot(time_values, np.zeros_like(time_values), 'g-', linewidth=2)
+filter_plot, = ax_filter.plot(time_values, np.zeros_like(time_values), 'r-', linewidth=2)
+total_plot, = ax_total.plot(time_values, np.zeros_like(time_values), 'k-', linewidth=2)
+
+
+# Function to update the pressure loss based on the flow rate (driven by blower power)
+def update_plot():
+    # Initialize arrays for pressure losses
+    duct_pressure_loss_Pa = np.zeros_like(time_values)
+    homes_pressure_loss_Pa = np.zeros_like(time_values)
+    filter_pressure_drop_Pa = np.zeros_like(time_values)
+    total_pressure_drop_Pa = np.zeros_like(time_values)
+    flow_rate_CFM = np.zeros_like(time_values)
+    wattage_W = np.zeros_like(time_values)
+
+    # Loop over time steps
+    for i, t in enumerate(time_values):
+        wattage_W[i] = blower_power(t)  # Wattage over time
+        flow_rate_CFM[i] = flow_rate_from_power(t)  # Flow rate based on wattage
+
+        # Calculate duct pressure loss at time t
+        duct_pressure_loss_Pa[i] = 0.2717287 * (flow_rate_CFM[i] ** 1.9) / (D_h_inches ** 5.02) * L
+
+        # Calculate home pressure loss at time t
+        homes_pressure_loss_Pa[i] = (flow_rate_CFM[i] / C_value) ** (1 / n)
+
+        # Calculate filter pressure drop at time t
+        filter_pressure_drop_Pa[i] = filter_pressure_drop * flow_rate_CFM[i]
+
+        # Calculate total pressure drop (sum of all components)
+        total_pressure_drop_Pa[i] = duct_pressure_loss_Pa[i] + homes_pressure_loss_Pa[i] + filter_pressure_drop_Pa[i]
+
+    # Update the blower fan flow rate and wattage plots
+    flow_rate_plot.set_ydata(flow_rate_CFM)
+    wattage_plot.set_ydata(wattage_W)
+
+    # Update the individual component plots
+    duct_plot.set_ydata(duct_pressure_loss_Pa)
+    homes_plot.set_ydata(homes_pressure_loss_Pa)
+    filter_plot.set_ydata(filter_pressure_drop_Pa)
+    total_plot.set_ydata(total_pressure_drop_Pa)
+
+    # Redraw the canvas
+    canvas.draw()
+
+
+# Create a canvas to embed the plot in the tkinter window
+canvas = FigureCanvasTkAgg(fig, master=root)
+canvas.get_tk_widget().pack()
+
+# Initial plot update
+update_plot()
+
+# Start the Tkinter main loop
+root.mainloop()
