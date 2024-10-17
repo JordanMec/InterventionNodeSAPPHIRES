@@ -1,0 +1,140 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import tkinter as tk
+
+# Initial Values
+n = 0.65
+D_h_inches = 10  # Duct diameter in inches
+flow_rate_CFM = np.linspace(0, 1300, 100)  # Flow rates in CFM
+C_value = 78.6
+filter_pressure_drop = 1.2136
+L = 130  # Duct length in feet
+
+use_duct_loss = True
+use_homes_loss = True
+use_filter_loss = True
+
+# Create the main window
+root = tk.Tk()
+root.title("Pressure Loss vs Flow Rate")
+
+# Create a figure with 4 subplots (2x2 grid)
+fig, axs = plt.subplots(2, 2, figsize=(10, 8))
+(ax_duct, ax_homes), (ax_filter, ax_total) = axs
+
+# Set common labels, titles, and grid for all subplots
+for ax in axs.flat:
+    ax.set_xlim([0, 1300])
+    ax.set_ylim([0, 400])
+    ax.grid(True)
+
+# Set titles for each subplot
+ax_duct.set_title('Duct Pressure Loss')
+ax_homes.set_title('Home Pressure Loss')
+ax_filter.set_title('Filter Pressure Drop')
+ax_total.set_title('Total Pressure Loss')
+
+# Create initial plots (empty for now)
+duct_plot, = ax_duct.plot(flow_rate_CFM, np.zeros_like(flow_rate_CFM), 'b-', linewidth=2)
+homes_plot, = ax_homes.plot(flow_rate_CFM, np.zeros_like(flow_rate_CFM), 'g-', linewidth=2)
+filter_plot, = ax_filter.plot(flow_rate_CFM, np.zeros_like(flow_rate_CFM), 'r-', linewidth=2)
+total_plot, = ax_total.plot(flow_rate_CFM, np.zeros_like(flow_rate_CFM), 'k-', linewidth=2)
+
+
+# Function to calculate and update all plots
+def update_plot():
+    global use_duct_loss, use_homes_loss, use_filter_loss
+
+    # Get current slider values
+    C_value = slider_C.get()
+    filter_pressure_drop = slider_filter.get()
+    L = slider_length.get()
+
+    # Initialize the total pressure drop
+    total_pressure_drop_Pa = np.zeros_like(flow_rate_CFM)
+
+    # Duct pressure loss calculation
+    duct_pressure_loss_Pa = 0.2717287 * (flow_rate_CFM ** 1.9) / (D_h_inches ** 5.02) * L
+
+    # Homes pressure loss calculation
+    homes_pressure_loss_Pa = (flow_rate_CFM / C_value) ** (1 / n)
+
+    # Filter pressure drop calculation
+    filter_pressure_drop_Pa = filter_pressure_drop * flow_rate_CFM
+
+    # Total pressure loss (sum of all components)
+    if use_duct_loss:
+        total_pressure_drop_Pa += duct_pressure_loss_Pa
+    if use_homes_loss:
+        total_pressure_drop_Pa += homes_pressure_loss_Pa
+    if use_filter_loss:
+        total_pressure_drop_Pa += filter_pressure_drop_Pa
+
+    # Update the individual component plots
+    duct_plot.set_ydata(duct_pressure_loss_Pa)
+    homes_plot.set_ydata(homes_pressure_loss_Pa)
+    filter_plot.set_ydata(filter_pressure_drop_Pa)
+    total_plot.set_ydata(total_pressure_drop_Pa)
+
+    # Redraw the canvas
+    canvas.draw()
+
+
+# Checkboxes for enabling/disabling components
+def toggle_duct_loss():
+    global use_duct_loss
+    use_duct_loss = not use_duct_loss
+    update_plot()
+
+
+def toggle_homes_loss():
+    global use_homes_loss
+    use_homes_loss = not use_homes_loss
+    update_plot()
+
+
+def toggle_filter_loss():
+    global use_filter_loss
+    use_filter_loss = not use_filter_loss
+    update_plot()
+
+
+# Create sliders for dynamic adjustment
+slider_C = tk.Scale(root, from_=39, to=315, resolution=0.1, label="Adjust C", orient=tk.HORIZONTAL,
+                    command=lambda x: update_plot())
+slider_C.set(C_value)
+slider_C.pack()
+
+slider_filter = tk.Scale(root, from_=0.5287, to=1.2136, resolution=0.0001, label="Filter Pressure Drop",
+                         orient=tk.HORIZONTAL, command=lambda x: update_plot())
+slider_filter.set(filter_pressure_drop)
+slider_filter.pack()
+
+slider_length = tk.Scale(root, from_=30, to=600, label="Duct Length", orient=tk.HORIZONTAL,
+                         command=lambda x: update_plot())
+slider_length.set(L)
+slider_length.pack()
+
+# Create checkboxes for the duct loss, homes loss, and filter loss
+checkbox_duct_loss = tk.Checkbutton(root, text="Use Duct Pressure Loss", command=toggle_duct_loss)
+checkbox_duct_loss.select()  # Initially selected
+checkbox_duct_loss.pack()
+
+checkbox_homes_loss = tk.Checkbutton(root, text="Use Homes Pressure Loss", command=toggle_homes_loss)
+checkbox_homes_loss.select()
+checkbox_homes_loss.pack()
+
+checkbox_filter_loss = tk.Checkbutton(root, text="Use Filter Pressure Drop", command=toggle_filter_loss)
+checkbox_filter_loss.select()
+checkbox_filter_loss.pack()
+
+# Create a canvas to embed the plot in the tkinter window
+canvas = FigureCanvasTkAgg(fig, master=root)
+canvas.get_tk_widget().pack()
+
+# Initial plot update
+update_plot()
+
+# Start the Tkinter main loop
+root.mainloop()
