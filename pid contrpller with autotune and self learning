@@ -1,0 +1,171 @@
+import smbus
+import time
+import sys
+import qwiic_relay
+import board
+import adafruit_ds3502
+import threading
+import pickle
+from gekko import GEKKO  # Import GEKKO for advanced PID control
+
+# Initialize the I2C bus and other devices
+bus = smbus.SMBus(1)
+address = 0x25
+DUAL_SOLID_STATE_RELAY = 0x0B
+myRelays = qwiic_relay.QwiicRelay(DUAL_SOLID_STATE_RELAY)
+i2c = board.I2C()
+
+TARGET_PRESSURE = 5.0
+MIN_POWER = 13
+MAX_POWER = 127
+
+# Initialize GEKKO for advanced PID control
+m = GEKKO(remote=False)
+
+# Define setpoint (target pressure)
+setpoint = m.Param(value=TARGET_PRESSURE)
+
+# Define control variable (manipulated variable) for potentiometer setting
+mv = m.Var(value=0, lb=MIN_POWER, ub=MAX_POWER)
+
+# Define process variable (measured pressure) with initial value
+pressure = m.Var(value=0)
+
+# PID tuning parameters (these can be adjusted or tuned)
+Kp = 1.0  # Proportional gain
+Ki = 0.1  # Integral gain
+Kd = 0.01  # Derivative gain
+
+# Define PID terms: error, integral, and derivative
+error = m.Var(value=0)
+integral = m.Var(value=0)
+derivative = m.Var(value=0)
+
+# Update error, integral, and derivative calculations
+m.Equation(error == setpoint - pressure)  # Calculate error
+m.Equation(integral.dt() == error)        # Integrate error over time
+m.Equation(derivative == (error.dt()))    # Differentiate error
+
+# PID control equation
+m.Equation(mv == Kp * error + Ki * integral + Kd * derivative)
+
+# Initialize learning_data globally and load previous data if available
+learning_data = {'initial_wiper_position': 0, 'last_pid_params': (Kp, Ki, Kd)}
+
+try:
+    with open('learning_data.pkl', 'rb') as f:
+        learning_data = pickle.load(f)
+    print(f"Loaded learned data: {learning_data}")
+except FileNotFoundError:
+    print("No learning data found. Starting with default parameters.")
+
+# Function to save learned data
+def save_learning_data():
+    with open('learning_data.pkl', 'wb') as f:
+        pickle.dump(learning_data, f)
+    print(f"Saved learning data: {learning_data}")
+
+# Function to read and control pressure
+def read_pressure():
+    bus.write_i2c_block_data(address, 0x3F, [0xF9])
+    time.sleep(0.8)
+    bus.write_i2c_block_data(address, 0x36, [0x03])
+
+    readings = []
+    
+    try:
+        while True:
+            time.sleep(0.5)
+            reading = bus.read_i2c_block_data(address, 0, 9)
+            pressure_value = reading[0] + float(reading[1]) / 255
+
+            if pressure_value >= 0 and pressure_value < 128:
+                differential_pressure = pressure_value * 240 / 256
+            elif pressure_value > 128 and pressure_value <= 256:
+                differential_pressure = -(256 - pressure_value) * 240 / 256
+            elif pressure_value == 128:
+                differential_pressure = 99999999
+
+            print(f"Differential Pressure: {differential_pressure} Pa")
+            readings.append(differential_pressure)
+
+            if len(readings) >= 20:
+                actual_pressure = sum(readings) / len(readings)
+                print(f"Actual Pressure (10-sec avg): {actual_pressure} Pa")
+                
+                # Update GEKKO model with the new pressure reading
+                pressure.value = actual_pressure
+                m.solve(disp=False)  # Solve GEKKO model to update control output
+                control = mv.value[0]  # GEKKO’s calculated control output
+                set_potentiometer(control)
+                
+                # Check if target pressure was reached quickly
+                if abs(actual_pressure - TARGET_PRESSURE) < 0.5:
+                    learning_data['initial_wiper_position'] = control
+                    print("Target pressure reached. Updating initial wiper position for next run.")
+                    save_learning_data()
+                
+                readings.clear()
+
+    except KeyboardInterrupt:
+        print("\nStopped pressure readings.")
+
+# Function to set the potentiometer with safety constraints
+def set_potentiometer(value):
+    devices = i2c.scan()
+    if 0x28 not in devices:
+        print("DS3502 not detected. Please check wiring.")
+        return
+
+    ds3502 = adafruit_ds3502.DS3502(i2c)
+    safe_value = max(MIN_POWER, int(value))
+    ds3502.wiper = safe_value
+    print(f"Potentiometer wiper set to {safe_value} for pressure control.")
+
+# Relay control with delayed fan startup and initial wiper position learning
+def relay_control():
+    print("\nRelay Control: Initializing damper and fan startup\n")
+    
+    # Set potentiometer to learned initial wiper position
+    devices = i2c.scan()
+    if 0x28 in devices:
+        ds3502 = adafruit_ds3502.DS3502(i2c)
+        ds3502.wiper = int(learning_data.get('initial_wiper_position', 0))
+        print(f"Potentiometer initialized to learned starting position: {learning_data.get('initial_wiper_position', 0)}.")
+
+    if myRelays.begin() == False:
+        print("Relay not connected. Please check the connection", file=sys.stderr)
+        return
+
+    myRelays.set_relay_on(2)
+    print("Damper is now opening...")
+    time.sleep(45)
+    myRelays.set_relay_on(1)
+    print("Fan relay is now on, fan will start as potentiometer increases.")
+    time.sleep(15)
+    print("Damper should now be fully open.")
+
+# Main function
+def main():
+    try:
+        # Start pressure reading with PID control
+        pressure_thread = threading.Thread(target=read_pressure)
+        pressure_thread.daemon = True
+        pressure_thread.start()
+
+        relay_thread = threading.Thread(target=relay_control)
+        relay_thread.daemon = True
+        relay_thread.start()
+
+        while True:
+            time.sleep(1)
+
+    except KeyboardInterrupt:
+        print("\nProgram interrupted by user.")
+    finally:
+        print("\nCleaning up before exiting.")
+        myRelays.set_all_relays_off()
+        print("Relays are now turned off.")
+
+if __name__ == "__main__":
+    main()
