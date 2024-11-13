@@ -1,0 +1,131 @@
+import smbus
+import time
+import sys
+import qwiic_relay
+import board
+import adafruit_ds3502
+import threading
+from simple_pid import PID  # Import the PID controller
+
+# Initialize the I2C bus for communication with the SDP810 sensor
+bus = smbus.SMBus(1)  # I2C bus 1
+address = 0x25  # I2C address of the SDP810 sensor
+
+# Initialize the relay object for controlling SSRs
+DUAL_SOLID_STATE_RELAY = 0x0B
+myRelays = qwiic_relay.QwiicRelay(DUAL_SOLID_STATE_RELAY)
+
+# Initialize the I2C interface for DS3502 digital potentiometer
+i2c = board.I2C()  # Uses board.SCL and board.SDA
+
+# Target pressure in Pascals
+TARGET_PRESSURE = 5.0
+
+# Initialize PID controller with safety limits: 10% minimum power, full power max
+pid = PID(1.0, 0.1, 0.05, setpoint=TARGET_PRESSURE)
+pid.output_limits = (13, 127)  # Constrain PID output between 13 (10%) and 127 (100%)
+
+# Function to continuously read, display, and control pressure using PID based on the averaged "actual pressure"
+def read_pressure():
+    bus.write_i2c_block_data(address, 0x3F, [0xF9])  # Start continuous measurement
+    time.sleep(0.8)  # Ensure sensor is ready for measurement
+    bus.write_i2c_block_data(address, 0x36, [0x03])  # Set up specific measurement configuration
+
+    readings = []
+
+    try:
+        while True:
+            time.sleep(0.5)  # Read every 0.5 seconds
+
+            # Read 9 bytes of data from the sensor
+            reading = bus.read_i2c_block_data(address, 0, 9)
+            pressure_value = reading[0] + float(reading[1]) / 255
+
+            # Calculate differential pressure
+            if pressure_value >= 0 and pressure_value < 128:
+                differential_pressure = pressure_value * 240 / 256
+            elif pressure_value > 128 and pressure_value <= 256:
+                differential_pressure = -(256 - pressure_value) * 240 / 256
+            elif pressure_value == 128:
+                differential_pressure = 99999999  # Outlier
+
+            # Print each differential pressure reading
+            print(f"Differential Pressure: {differential_pressure} Pa")
+            readings.append(differential_pressure)
+
+            # Every 10 seconds (20 data points), calculate "Actual Pressure" and apply PID control
+            if len(readings) >= 20:
+                actual_pressure = sum(readings) / len(readings)
+                print(f"Actual Pressure (10-sec avg): {actual_pressure} Pa")
+
+                # Use the averaged "actual pressure" as input for the PID controller
+                control = pid(actual_pressure)  # Calculate PID output
+                set_potentiometer(control)  # Adjust potentiometer based on PID output
+
+                # Reset the readings list for the next 10-second averaging interval
+                readings.clear()
+                readings.clear()
+
+    except KeyboardInterrupt:
+        print("\nStopped pressure readings.")
+
+# Function to set the DS3502 potentiometer wiper based on PID output with safety check
+def set_potentiometer(value):
+    # Check if DS3502 is available
+    devices = i2c.scan()
+    if 0x28 not in devices:
+        print("DS3502 not detected. Please check wiring.")
+        return
+
+    # Initialize DS3502 device
+    ds3502 = adafruit_ds3502.DS3502(i2c)
+
+    # Apply safety constraint: limit to minimum 10% power if below threshold
+    safe_value = max(13, int(value))  # Ensure value is at least 13
+    ds3502.wiper = safe_value
+    print(f"Potentiometer wiper set to {safe_value} for pressure control.")
+
+# Relay control for damper and fan
+def relay_control():
+    print("\nRelay Control: Opening damper and starting fan\n")
+    if myRelays.begin() == False:
+        print("Relay not connected. Please check the connection", file=sys.stderr)
+        return
+
+    myRelays.set_relay_on(2)  # Open damper
+    print("Damper is now open.")
+    time.sleep(60)  # Simulate damper fully opening
+
+    myRelays.set_relay_on(1)  # Turn on fan
+    print("Fan is now running at max power.")
+
+# Main function to start threads for components
+def main():
+    try:
+        # Start pressure reading with PID control
+        pressure_thread = threading.Thread(target=read_pressure)
+        pressure_thread.daemon = True
+        pressure_thread.start()
+
+        # Start relay control for damper and fan
+        relay_thread = threading.Thread(target=relay_control)
+        relay_thread.daemon = True
+        relay_thread.start()
+
+        # Keep the main thread alive while other threads run
+        while True:
+            time.sleep(1)
+
+    except KeyboardInterrupt:
+        print("\nProgram interrupted by user.")
+
+    finally:
+        print("\nCleaning up before exiting.")
+        myRelays.set_all_relays_off()  # Turn off all relays
+        print("Relays are now turned off.")
+
+# Entry point
+if __name__ == "__main__":
+    main()
+
+
