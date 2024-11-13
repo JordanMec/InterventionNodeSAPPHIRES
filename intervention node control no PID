@@ -1,0 +1,146 @@
+import smbus
+import time
+import sys
+import qwiic_relay  # Import the SparkFun Qwiic Relay library for controlling relays
+import board
+import adafruit_ds3502
+import threading  # Import threading for concurrency
+
+# Initialize the I2C bus for communication with the SDP810 sensor
+bus = smbus.SMBus(1)  # I2C bus 1
+address = 0x25  # I2C address of the SDP810 sensor
+
+# Initialize the relay object for controlling SSRs
+DUAL_SOLID_STATE_RELAY = 0x0B
+myRelays = qwiic_relay.QwiicRelay(DUAL_SOLID_STATE_RELAY)
+
+# Initialize the I2C interface for DS3502 digital potentiometer
+i2c = board.I2C()  # Uses board.SCL and board.SDA
+
+# Function to continuously read and display pressure data from the SDP810 sensor
+def read_pressure():
+    # Send command to start continuous measurement
+    bus.write_i2c_block_data(address, 0x3F, [0xF9])
+    time.sleep(0.8)  # Ensure sensor is ready for measurement
+
+    # Set up specific measurement configuration
+    bus.write_i2c_block_data(address, 0x36, [0x03])
+
+    # Variables to store readings for 10-second average calculation
+    readings = []
+    start_time = time.time()
+
+    try:
+        while True:
+            time.sleep(0.5)  # Adjust sleep time as needed for desired read frequency
+
+            # Read 9 bytes of data from the sensor starting at register 0
+            reading = bus.read_i2c_block_data(address, 0, 9)
+
+            # Calculate the pressure value from the sensor data
+            pressure_value = reading[0] + float(reading[1]) / 255
+
+            # Determine the differential pressure based on the pressure value range
+            if pressure_value >= 0 and pressure_value < 128:
+                differential_pressure = pressure_value * 240 / 256
+            elif pressure_value > 128 and pressure_value <= 256:
+                differential_pressure = -(256 - pressure_value) * 240 / 256
+            elif pressure_value == 128:
+                differential_pressure = 99999999  # Special outlier/error value
+
+            # Print the differential pressure value to the screen immediately
+            print(f"Differential Pressure: {differential_pressure} Pa")
+
+            # Add the reading to the list for averaging
+            readings.append(differential_pressure)
+
+            # Calculate and display the "actual pressure" every 10 seconds
+            if time.time() - start_time >= 10:
+                actual_pressure = sum(readings) / len(readings) if readings else 0
+                print(f"Actual Pressure (10-sec avg): {actual_pressure} Pa")
+
+                # Reset the readings list and start time for the next 10-second interval
+                readings.clear()
+                start_time = time.time()
+
+    except KeyboardInterrupt:
+        print("\nStopped pressure readings.")
+# Function to control the relay for opening the damper and turning on the fan
+def relay_control():
+    print("\nSparkFun Qwiic Relay Fully Open Operation\n")
+
+    # Check if the relay is connected to the system (via I2C)
+    if myRelays.begin() == False:
+        print("The Qwiic Relay isn't connected to the system. Please check your connection", file=sys.stderr)
+        return
+
+    # Print the current state of both relays (1 and 2)
+    for relayNum in range(1, 3):  # Loop through relays 1 and 2
+        current_status = "On" if myRelays.get_relay_state(relayNum) else "Off"
+        print(f"Status of Relay {relayNum}: {current_status}")
+
+    # Turn on relay 2 (SSR #2) to open the damper
+    myRelays.set_relay_on(2)  # SSR #2 is now on
+    print("Relay Two (SSR #2) is Now On and Keeping the Damper Open")
+
+    # Wait for 60 seconds to simulate the time it takes for the damper to fully open
+    print("Waiting 60 seconds for the damper to fully open...")
+    time.sleep(60)  # Wait for 60 seconds
+
+    # Turn on the fan at max power
+    print("Turning on the fan (SSR #1) at max power.")
+    myRelays.set_relay_on(1)  # SSR #1 is now on (fan is on at max power)
+    print("Fan is now running at max power.")
+
+# Function to adjust the DS3502 potentiometer to a fixed setting (e.g., max value)
+def set_potentiometer():
+    # Scan for devices and check if DS3502 is available
+    devices = i2c.scan()
+    if 0x28 not in devices:
+        print("DS3502 not detected. Please check wiring.")
+    else:
+        print("DS3502 detected at address 0x28.")
+
+        # Initialize DS3502 device if detected
+        ds3502 = adafruit_ds3502.DS3502(i2c)
+
+        # Set the potentiometer to a specific wiper value, e.g., max (127)
+        ds3502.wiper = 127
+        print("Potentiometer wiper set to max (127) for full output.")
+
+# Main function to initialize and start threads for each component
+def main():
+    try:
+        # Start pressure reading thread
+        pressure_thread = threading.Thread(target=read_pressure)
+        pressure_thread.daemon = True  # Daemonize to close with the main program
+        pressure_thread.start()
+
+        # Start relay control thread for damper and fan
+        relay_thread = threading.Thread(target=relay_control)
+        relay_thread.daemon = True  # Daemonize to close with the main program
+        relay_thread.start()
+
+        # Start potentiometer setting thread
+        pot_thread = threading.Thread(target=set_potentiometer)
+        pot_thread.daemon = True  # Daemonize to close with the main program
+        pot_thread.start()
+
+        # Keep the main thread alive while the other threads run
+        while True:
+            time.sleep(1)  # Keeps main thread active to monitor all other threads
+
+    except KeyboardInterrupt:
+            time.sleep(1)  # Keeps main thread active to monitor all other threads
+   except KeyboardInterrupt:
+        print("\nProgram interrupted by user.")
+
+    finally:
+        print("\nCleaning up before exiting.")
+        myRelays.set_all_relays_off()  # Turn off all relays
+        print("Relays are now turned off.")
+
+# Entry point of the script
+if __name__ == "__main__":
+    main()
+
