@@ -1,0 +1,184 @@
+from time import sleep
+import board
+import adafruit_ds3502
+import qwiic_relay
+import smbus
+import sys
+from collections import deque
+import threading
+
+def scan_i2c_devices(i2c):
+    """Scan for I2C devices and return their addresses."""
+    devices = i2c.scan()  # Perform an I2C scan
+    if not devices:
+        print("No I2C device detected.")
+    else:
+        print("I2C device(s) detected:")
+        for device in devices:
+            print(f"Device found at address: 0x{device:02X}")
+    return devices
+
+# Initialize I2C interface
+i2c = board.I2C()  # Uses board.SCL and board.SDA
+bus = smbus.SMBus(1)  # For pressure sensor
+
+# Initialize the relay object for controlling SSRs
+DUAL_SOLID_STATE_RELAY = 0x0A
+myRelays = qwiic_relay.QwiicRelay(DUAL_SOLID_STATE_RELAY)
+
+# Sensirion SDP810 settings
+PRESSURE_SENSOR_ADDRESS = 0x25
+
+# Check relay connection
+if not myRelays.begin():
+    print("Relay not connected. Please check the connection", file=sys.stderr)
+    sys.exit(1)
+
+print("Relay initialized successfully.")
+
+# Scan for devices and check if DS3502 and pressure sensor are available
+devices = scan_i2c_devices(i2c)
+if 0x28 not in devices:
+    print("DS3502 not detected. Please check wiring.")
+    sys.exit(1)
+else:
+    print("DS3502 detected at address 0x28.")
+    ds3502 = adafruit_ds3502.DS3502(i2c)
+
+if PRESSURE_SENSOR_ADDRESS not in devices:
+    print("SDP810 pressure sensor not detected. Please check wiring.")
+    sys.exit(1)
+else:
+    print(f"SDP810 pressure sensor detected at address 0x{PRESSURE_SENSOR_ADDRESS:02X}.")
+
+
+
+
+
+
+
+
+def read_pressure_sensor():
+    """
+    Read pressure values from the sensor, calculate an average to determine "Actual Pressure,"
+    and adjust the fan speed to maintain a target pressure using proportional control.
+
+    To change the number of data points used for averaging:
+    1. Update the value of the `averaging_window` variable below.
+    2. This determines how many data points are used to calculate the average pressure.
+    """
+    readings = []  # List to store individual pressure readings for averaging
+    target_pressure = 0.75  # Target pressure in Pascals
+    K_p = 30  # Proportional gain for control (higher value = more aggressive adjustment)
+    min_wiper_value = int(0.15 * 127)  # Minimum wiper value (15% of max wiper value)
+
+    # Number of pressure readings to use for averaging
+    averaging_window = 8  # Change this value to adjust the number of readings for averaging
+
+    # Initialize and start continuous measurement commands
+    bus.write_i2c_block_data(PRESSURE_SENSOR_ADDRESS, 0x3F, [0xF9])  # Initialize the sensor
+    sleep(0.8)  # Allow initialization
+    bus.write_i2c_block_data(PRESSURE_SENSOR_ADDRESS, 0x36, [0x03])  # Start continuous measurement
+
+    try:
+        while True:
+            sleep(0.5)  # Read pressure every 0.5 seconds
+
+            # Read 9 bytes of data from the sensor
+            reading = bus.read_i2c_block_data(PRESSURE_SENSOR_ADDRESS, 0, 9)
+            pressure_value = reading[0] + float(reading[1]) / 255
+
+            # Calculate differential pressure
+            if pressure_value >= 0 and pressure_value < 128:
+                differential_pressure = pressure_value * 240 / 256
+            elif pressure_value > 128 and pressure_value <= 256:
+                differential_pressure = -(256 - pressure_value) * 240 / 256
+            elif pressure_value == 128:
+                differential_pressure = 99999999  # Outlier or invalid reading
+
+            # Print each differential pressure reading
+            print(f"Differential Pressure: {differential_pressure} Pa")
+            readings.append(differential_pressure)
+
+            # If enough readings have been collected, calculate the average pressure
+            if len(readings) >= averaging_window:
+                # Calculate "Actual Pressure" as the average of the collected readings
+                actual_pressure = sum(readings) / len(readings)
+                print(f"Actual Pressure ({averaging_window}-point avg): {actual_pressure:.2f} Pa")
+
+                # Proportional control logic to maintain the target pressure
+                error = target_pressure - actual_pressure  # Calculate the error (difference from target)
+                adjustment = K_p * error  # Adjust wiper value proportionally to the error
+
+                # Calculate new wiper value, clamped to ensure it stays within safe limits
+                new_wiper_value = max(min_wiper_value, min(127, ds3502.wiper + int(adjustment)))
+                ds3502.wiper = new_wiper_value
+                print(f"Adjusted wiper value to maintain target pressure: {new_wiper_value}")
+
+                # Reset the readings list for the next averaging cycle
+                readings.clear()
+
+    except Exception as e:
+        print(f"Error reading pressure sensor: {e}")
+        sys.exit(1)
+
+
+
+
+
+
+
+
+# Startup Process
+try:
+    print("Starting the boot-up sequence...")
+
+    # Step 1: Open the damper (Relay 1) for 50 seconds and keep it open
+    print("Opening damper via Relay 1...")
+    myRelays.set_relay_on(1)  # Turn on Relay 1
+    sleep(50)  # Wait for 50 seconds
+    print("Damper is now fully opened and will remain open.")
+
+    # Step 2: Turn on Relay 2
+    print("Activating Relay 2...")
+    myRelays.set_relay_on(2)  # Turn on Relay 2
+    print("Relay 2 is now activated. Waiting 5 seconds before adjusting the wiper...")
+    sleep(5)  # Wait for 5 seconds before allowing wiper adjustment
+
+    # Set the initial potentiometer value to 15% of the maximum
+    print(f"Setting initial wiper value to {int(0.15 * 127)}...")
+    ds3502.wiper = int(0.15 * 127)
+
+    # Start the pressure sensor thread
+    print("Starting pressure sensor readings...")
+    pressure_thread = threading.Thread(target=read_pressure_sensor, daemon=True)
+    pressure_thread.start()
+
+    # Main loop for user-controlled fan speed
+    print("Starting main loop...")
+    max_wiper_value = 127  # Maximum wiper value (100% power)
+    step = max_wiper_value // 5  # Calculate the step size for each level (0-5)
+
+    while True:
+        # Prompt the user to set the fan speed
+        try:
+            user_input = int(input("Set fan speed (0-5): "))
+            if 0 <= user_input <= 5:
+                wiper_value = max(min_wiper_value, user_input * step)  # Ensure user input respects safety limit
+                ds3502.wiper = wiper_value
+                print(f"Fan speed set to level {user_input} ({(wiper_value / max_wiper_value) * 100:.1f}% power).")
+            else:
+                print("Invalid input. Please enter a value between 0 and 5.")
+        except ValueError:
+            print("Invalid input. Please enter an integer between 0 and 5.")
+
+except KeyboardInterrupt:
+    # Handle the user pressing Ctrl+C to exit
+    print("\nProgram interrupted by user.")
+
+finally:
+    # Ensure the wiper is reset to zero and relays are turned off before exiting
+    print("Resetting wiper to 0 and turning off all relays...")
+    ds3502.wiper = 0
+    myRelays.set_all_relays_off()
+    print("Wiper set to 0 and relays turned off. Exiting program.")
