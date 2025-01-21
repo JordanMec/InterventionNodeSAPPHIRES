@@ -1,0 +1,340 @@
+from flask import Flask, render_template_string, jsonify, request
+from time import sleep, time
+import board
+import adafruit_ds3502
+import qwiic_relay
+import smbus
+import sys
+from collections import deque
+import threading 
+
+# Flask app
+app = Flask(__name__)
+
+# Pressure monitoring variables
+data = deque(maxlen=240)  # Keep the last 240 data points (120 seconds of data at 0.5s intervals)
+target_pressure = 0.75  # Target pressure in Pascals
+actual_pressure = 0  # Placeholder for actual pressure
+averaging_window = 10  # Default averaging window
+K_p = 30  # Default proportional gain
+start_time = time()
+
+# Event-related variables
+event_active = False
+current_event_data = []  # To store data during an event
+
+# Initialize I2C interface and hardware
+i2c = board.I2C()
+bus = smbus.SMBus(1)
+DUAL_SOLID_STATE_RELAY = 0x0A
+myRelays = qwiic_relay.QwiicRelay(DUAL_SOLID_STATE_RELAY)
+PRESSURE_SENSOR_ADDRESS = 0x25
+
+def scan_i2c_devices(i2c):
+    """Scan for I2C devices and return their addresses."""
+    # Scan for I2C devices connected to the bus
+    devices = i2c.scan()  # Perform an I2C scan
+    if not devices:
+        print("No I2C device detected.")
+    else:
+        print("I2C device(s) detected:")
+        for device in devices:
+            print(f"Device found at address: 0x{device:02X}")
+    return devices
+
+# Hardware initialization
+def initialize_hardware():
+    # Scan and initialize connected hardware devices
+    devices = scan_i2c_devices(i2c)
+    if PRESSURE_SENSOR_ADDRESS not in devices:
+        print("Pressure sensor not detected. Exiting.")
+        sys.exit(1)
+    if not myRelays.begin():
+        print("Relay not connected. Exiting.")
+        sys.exit(1)
+    global ds3502
+    ds3502 = adafruit_ds3502.DS3502(i2c)
+    print("Hardware initialized.")
+
+# Pressure sensor reading and control
+def read_pressure_sensor():
+    # Continuously read the pressure sensor and adjust control parameters
+    global actual_pressure, target_pressure, averaging_window, K_p, event_active, current_event_data
+    readings = []
+    min_wiper_value = int(0.15 * 127)
+    # Initialize and start sensor measurement
+    bus.write_i2c_block_data(PRESSURE_SENSOR_ADDRESS, 0x3F, [0xF9])
+    sleep(0.8)
+    bus.write_i2c_block_data(PRESSURE_SENSOR_ADDRESS, 0x36, [0x03])
+
+    try:
+        while True:
+            sleep(0.5)  # Read every 0.5 seconds
+            reading = bus.read_i2c_block_data(PRESSURE_SENSOR_ADDRESS, 0, 9)
+            pressure_value = reading[0] + float(reading[1]) / 255
+            # Convert the sensor reading to a differential pressure value
+            if 0 <= pressure_value < 128:
+                differential_pressure = pressure_value * 240 / 256
+            elif 128 < pressure_value <= 256:
+                differential_pressure = -(256 - pressure_value) * 240 / 256
+            else:
+                differential_pressure = 99999999
+
+            readings.append(differential_pressure)
+            if len(readings) >= averaging_window:
+                # Calculate the average pressure over the window
+                actual_pressure = sum(readings) / len(readings)
+                error = target_pressure - actual_pressure
+                adjustment = K_p * error
+                # Adjust the DS3502 wiper value based on the error
+                new_wiper_value = max(min_wiper_value, min(127, ds3502.wiper + int(adjustment)))
+                ds3502.wiper = new_wiper_value
+
+                # Add the latest data point to the deque
+                elapsed_time = time() - start_time
+                data_point = {
+                    'time': elapsed_time,
+                    'set_pressure': target_pressure,
+                    'actual_pressure': actual_pressure,
+                    'wiper_value': ds3502.wiper
+                }
+                data.append(data_point)  # Keep the last 120 points (60 seconds of data)
+
+                # Capture event data if active
+                if event_active:
+                    current_event_data.append(data_point)
+
+                readings.clear()
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+# Save event data to a .log file
+def save_event_data(file_name):
+    # Save the event data to a .log file with tab-separated values
+    if not file_name.endswith('.log'):
+        file_name += '.log'  # Ensure the file has a .log extension
+    with open(file_name, 'w') as logfile:
+        logfile.write("Time\tSet Pressure\tActual Pressure\tWiper Value\n")
+        for entry in current_event_data:
+            logfile.write(
+                f"{entry['time']:.2f}\t{entry['set_pressure']:.2f}\t"
+                f"{entry['actual_pressure']:.2f}\t{entry['wiper_value']}\n"
+            )
+
+# HTML template for real-time graph and event capture
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live Pressure Monitoring</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <h1>Live Pressure vs Time</h1>
+    <canvas id="pressureChart" width="800" height="400"></canvas>
+    <div>
+        <label for="targetPressure">Set Target Pressure (Pa): </label>
+        <input type="number" id="targetPressure" step="0.01" value="0.75">
+        <button onclick="updateTargetPressure()">Update</button>
+    </div>
+    <div>
+        <label for="averagingWindow">Set Averaging Window: </label>
+        <input type="number" id="averagingWindow" step="1" min="1" value="10">
+        <button onclick="updateAveragingWindow()">Update</button>
+    </div>
+    <div>
+        <label for="K_p">Set K_p Value: </label>
+        <input type="number" id="K_p" step="1" min="1" value="30">
+        <button onclick="updateKp()">Update</button>
+    </div>
+    <div>
+        <h3>Event Capture</h3>
+        <button onclick="startEvent()">Start Event</button>
+        <button onclick="endEvent()">End Event</button>
+        <br>
+        <label for="fileName">File Name: </label>
+        <input type="text" id="fileName" placeholder="event_data.log">
+        <button onclick="saveEvent()">Save</button>
+    </div>
+    <script>
+        const ctx = document.getElementById('pressureChart').getContext('2d');
+        const pressureChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    { label: 'Set Pressure', data: [], borderColor: 'blue', fill: false, yAxisID: 'y' },
+                    { label: 'Actual Pressure', data: [], borderColor: 'red', fill: false, yAxisID: 'y' },
+                    { label: 'Wiper Value', data: [], borderColor: 'green', fill: false, yAxisID: 'y1' }
+                ]
+            },
+            options: {
+                animation: false,  // Disable animation for fixed lines
+                scales: {
+                    x: { title: { display: true, text: 'Elapsed Time (s)' } },
+                    y: {
+                        title: { display: true, text: 'Pressure (Pa)' },
+                        min: -1,
+                        max: 3.5,
+                        position: 'left'
+                    },
+                    y1: {
+                        title: { display: true, text: 'Wiper Value' },
+                        position: 'right',
+                        grid: { drawOnChartArea: false }
+                    }
+                }
+            }
+        });
+
+        async function updateChart() {
+            // Update the graph with the latest data from the server
+            const response = await fetch('/data');
+            const data = await response.json();
+
+            pressureChart.data.labels = data.map(d => (d.time - data[0].time).toFixed(1));
+            pressureChart.data.datasets[0].data = data.map(d => d.set_pressure);
+            pressureChart.data.datasets[1].data = data.map(d => d.actual_pressure);
+            pressureChart.data.datasets[2].data = data.map(d => d.wiper_value);
+
+            pressureChart.update();
+        }
+
+        async function updateTargetPressure() {
+            // Send the updated target pressure value to the server
+            const targetPressure = document.getElementById('targetPressure').value;
+            await fetch('/set_target_pressure', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ target_pressure: targetPressure })
+            });
+        }
+
+        async function updateAveragingWindow() {
+            // Send the updated averaging window value to the server
+            const averagingWindow = document.getElementById('averagingWindow').value;
+            await fetch('/set_averaging_window', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ averaging_window: averagingWindow })
+            });
+        }
+
+        async function updateKp() {
+            // Send the updated K_p value to the server
+            const K_p = document.getElementById('K_p').value;
+            await fetch('/set_K_p', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ K_p: K_p })
+            });
+        }
+
+        async function startEvent() {
+            // Notify the server to start capturing event data
+            await fetch('/start_event', { method: 'POST' });
+        }
+
+        async function endEvent() {
+            // Notify the server to stop capturing event data
+            await fetch('/end_event', { method: 'POST' });
+        }
+
+        async function saveEvent() {
+            // Send a request to save the captured event data to a file
+            const fileName = document.getElementById('fileName').value || 'event_data.log';
+            await fetch('/save_event', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ file_name: fileName })
+            });
+        }
+
+        setInterval(updateChart, 1000);
+    </script>
+</body>
+</html>
+"""
+
+# Flask routes
+@app.route('/')
+def home():
+    # Serve the main HTML template to the user
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/data')
+def data_endpoint():
+    # Serve the latest data for the graph
+    return jsonify(list(data))
+
+@app.route('/set_target_pressure', methods=['POST'])
+def set_target_pressure():
+    # Update the target pressure value based on user input
+    global target_pressure
+    target_pressure = float(request.json.get('target_pressure', target_pressure))
+    return jsonify({"status": "success", "target_pressure": target_pressure})
+
+@app.route('/set_averaging_window', methods=['POST'])
+def set_averaging_window():
+    # Update the averaging window size based on user input
+    global averaging_window
+    averaging_window = int(request.json.get('averaging_window', averaging_window))
+    return jsonify({"status": "success", "averaging_window": averaging_window})
+
+@app.route('/set_K_p', methods=['POST'])
+def set_K_p():
+    # Update the proportional gain value based on user input
+    global K_p
+    K_p = float(request.json.get('K_p', K_p))
+    return jsonify({"status": "success", "K_p": K_p})
+
+@app.route('/start_event', methods=['POST'])
+def start_event():
+    # Begin capturing event data
+    global event_active, current_event_data
+    current_event_data = []
+    event_active = True
+    return jsonify({"status": "Event started"})
+
+@app.route('/end_event', methods=['POST'])
+def end_event():
+    # Stop capturing event data
+    global event_active
+    event_active = False
+    return jsonify({"status": "Event ended"})
+
+@app.route('/save_event', methods=['POST'])
+def save_event():
+    # Save the captured event data to a file
+    file_name = request.json.get('file_name', 'event_data.log')  # Default to .log file
+    save_event_data(file_name)
+    return jsonify({"status": f"Event data saved to {file_name}"})
+
+# Main program
+if __name__ == "__main__":
+    initialize_hardware()
+
+    # Start pressure sensor reading in a separate thread
+    threading.Thread(target=read_pressure_sensor, daemon=True).start()
+# Startup process
+    try:
+        print("Starting the boot-up sequence...")
+        myRelays.set_relay_on(1)  # Open damper
+        sleep(4)  # Wait for the damper to fully open
+        print("Damper is open.")
+        myRelays.set_relay_on(2)  # Turn on Relay 2
+        sleep(5)  # Allow Relay 2 to stabilize
+        ds3502.wiper = 0  # Ensure wiper starts at 0
+        print("Pressure sensor readings started.")
+
+        # Start Flask web server
+        print("Starting web server. Visit http://<Your-Raspberry-Pi-IP>:5000")
+        app.run(host='0.0.0.0', port=5000)
+    except KeyboardInterrupt:
+        print("\nProgram interrupted by user.")
+    finally:
+        # Perform cleanup on shutdown
+        ds3502.wiper = 0
+        myRelays.set_all_relays_off()
+        print("Shutdown complete.")
