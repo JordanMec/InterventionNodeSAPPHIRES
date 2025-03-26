@@ -1,0 +1,203 @@
+function digitalTwinPressureControl24h()
+% DIGITALTWINPRESSURECONTROL24H
+%   Digital Twin Simulation for House Pressure Control Over 24 Hours
+%   This simulation models a system where the house pressure is controlled
+%   via a blower whose performance is limited by a fan curve. The total
+%   pressure loss is computed as the sum of losses in the ducting, filter,
+%   and homes envelope. A PI controller adjusts the blower's wiper value to
+%   drive the house pressure to a target value. Additionally, scheduled
+%   exhaust fan events force the pressure to deviate, prompting the control
+%   action. At the end, the simulation reports the total volumetric flow
+%   rate across the HEPA 13 filter.
+
+
+    %% Clear workspace and close figures
+    clear; clc; close all;
+    
+    %% Simulation Settings
+    time_duration = 86400;         % Total simulation time: 24 hours (seconds)
+    dt = 0.5;                    % Time step in seconds (adjust as needed)
+    time_steps = round(time_duration/dt);
+    
+    %% House & Loss Model Parameters
+    % Target and ambient conditions
+    target_pressure = 1.0;       % Target house pressure in Pascals (Pa)
+    outside_pressure = 0;        % Outside pressure (gauge = 0)
+    
+    % Duct parameters
+    D_h_inches = 10;           % Duct diameter in inches
+    L = 130;                   % Duct length in feet
+    
+    % Homes envelope loss parameters (using Homes pressure loss model)
+    C_value = 78.6;            % Homes loss "C" value
+    n_homes = 0.65;            % Homes loss exponent
+    
+    % Filter loss parameter (linear relationship: P = filter_slope * Q)
+    filter_slope = 1.2136;     % Filter pressure drop slope (Pa/CFM)
+    
+    % Define loss functions (Q in CFM, pressure in Pa)
+    duct_loss    = @(Q) 0.2717287 * (Q.^1.9) / (D_h_inches^5.02) * L;
+    homes_loss   = @(Q) (Q / C_value).^(1/n_homes);
+    filter_loss  = @(Q) filter_slope * Q;
+    total_loss   = @(Q) duct_loss(Q) + homes_loss(Q) + filter_loss(Q);
+    
+    %% Fan Curve Parameters
+    % Provided fan curve data (flow in CFM, pressure in Pa)
+    fixed_flow_rate_CFM = [1237, 1156, 1079, 997, 900, 769, 118, 0];
+    fixed_pressure_Pa   = [0,    49.8, 99.5, 149, 199, 248.8, 374, 399];
+    % For interpolation, sort the data in ascending order of flow
+    [fc, idx] = sort(fixed_flow_rate_CFM);
+    fp = fixed_pressure_Pa(idx);
+    % Fan curve function: the available fan pressure at a given flow Q (CFM)
+    % scales with the blower wiper value. (wiper/128) scales the base curve.
+    fan_pressure = @(Q, wiper) (wiper/128) * interp1(fc, fp, Q, 'linear', 'extrap');
+    
+    %% Leakage Model & Exhaust Fan Parameters
+    % Leakage parameters (affecting net flow due to envelope leakage)
+    C_normal   = 90;      % Normal leakage coefficient (CFM)
+    C_exhaust  = 180;     % Leakage coefficient when exhaust fan is active (CFM)
+    n_default  = 0.65;    % Leakage exponent normally
+    n_exhaust  = 0.55;    % Leakage exponent during exhaust fan event
+    exhaust_flow_CFM = 150;  % Exhaust fan removal flow (CFM)
+    
+    %% PI Controller Parameters for Blower Wiper Control
+    initial_wiper = 46;   % Initial wiper value (equilibrium condition)
+    wiper = initial_wiper;
+    Kp = 5;               % Proportional gain
+    Ki = 0.05;            % Integral gain
+    min_wiper = 0;
+    max_wiper = 128;
+    integral_error = 0;
+    
+    %% Initialize House Pressure
+    actual_pressure = target_pressure;  % Start at target pressure (Pa)
+    
+    %% Preallocate Arrays for Logging
+    time_series    = zeros(1, time_steps);
+    pressure_series = zeros(1, time_steps);
+    wiper_series   = zeros(1, time_steps);
+    Qfan_series    = zeros(1, time_steps);
+    error_series   = zeros(1, time_steps); % Log PI controller error
+    
+    %% Main Simulation Loop (24 hours)
+    for step = 1:time_steps
+        current_time = (step-1)*dt;
+        
+        %% Determine if Exhaust Fan is Active
+        % Scheduled exhaust events:
+        %   Hour 1:    3600 - 5400 s
+        %   Hour 6:   21600 - 23400 s
+        %   Hour 12:  43200 - 45000 s
+        %   Hour 18:  64800 - 66600 s
+        if (current_time >= 3600 && current_time < 5400) || ...
+           (current_time >= 21600 && current_time < 23400) || ...
+           (current_time >= 43200 && current_time < 45000) || ...
+           (current_time >= 64800 && current_time < 66600)
+            Q_exhaust = exhaust_flow_CFM;
+            effectiveC = C_exhaust;
+            n_leak = n_exhaust;
+        else
+            Q_exhaust = 0;
+            effectiveC = C_normal;
+            n_leak = n_default;
+        end
+        
+        %% Compute Operating Flow from Fan Curve & Total Losses
+        % Find Q such that: fan_pressure(Q, wiper) == total_loss(Q)
+        % This Q is the operating blower flow (CFM).
+        f = @(Q) fan_pressure(Q, wiper) - total_loss(Q);
+        try
+            Q_operating = fzero(f, 500);  % initial guess of 500 CFM
+        catch
+            Q_operating = 0;
+        end
+        Q_operating = max(Q_operating, 0);  % ensure non-negative
+        Q_fan = Q_operating;
+        
+        %% Leakage Calculation
+        % Compute leakage flow based on the current pressure difference.
+        DeltaP = actual_pressure - outside_pressure;
+        Q_leak = effectiveC * (abs(DeltaP)^n_leak);
+        
+        %% Backward Euler Integration for Pressure Update
+        % The net flow into the house is given by:
+        %   net_flow = Q_fan - (leakage flow) - Q_exhaust
+        % and pressure is updated via p_new = p_old + dt*(net_flow in m^3/s)
+        p_old = actual_pressure;
+        p_new = p_old;   % initial guess
+        tolerance = 1e-6;
+        max_iter = 10;
+        for iter = 1:max_iter
+            DeltaP_new = p_new - outside_pressure;
+            Q_leak_new = effectiveC * (abs(DeltaP_new)^n_leak);
+            net_flow = Q_fan - sign(DeltaP_new)*Q_leak_new - Q_exhaust;
+            net_flow_m3s = net_flow * 0.000471947;  % Convert CFM to m^3/s
+            p_next = p_old + dt * net_flow_m3s;
+            if abs(p_next - p_new) < tolerance
+                p_new = p_next;
+                break;
+            end
+            p_new = p_next;
+        end
+        actual_pressure = p_new;
+        
+        %% PI Controller: Adjust Blower Wiper to Control Pressure
+        error = target_pressure - actual_pressure;
+        integral_error = integral_error + error*dt;
+        % Anti-windup: constrain the integral term
+        integral_error = max(-5, min(5, integral_error));
+        wiper_adjustment = Kp * error + Ki * integral_error;
+        if current_time < 20
+            wiper = initial_wiper;
+        else
+            % Adjust slowly (0.05 factor) to simulate actuator dynamics
+            wiper = wiper + 0.05 * wiper_adjustment;
+            wiper = max(min_wiper, min(max_wiper, wiper));
+        end
+        
+        %% Log Data for This Time Step
+        time_series(step) = current_time;
+        pressure_series(step) = actual_pressure;
+        wiper_series(step) = wiper;
+        Qfan_series(step) = Q_fan;
+        error_series(step) = error;
+    end
+    
+    %% Determine Total Volumetric Flow Rate Across the HEPA Filter
+    % Here we assume the entire blower flow (Q_fan) passes through the HEPA filter.
+    final_Q_fan   = Qfan_series(end);
+    average_Q_fan = mean(Qfan_series);
+    fprintf('Final Volumetric Flow Rate across the HEPA Filter: %.2f CFM\n', final_Q_fan);
+    fprintf('Average Volumetric Flow Rate across the HEPA Filter: %.2f CFM\n', average_Q_fan);
+    
+    %% Plot Results
+    figure('Name','Digital Twin Pressure Control 24h','NumberTitle','off');
+    
+    subplot(4,1,1);
+    plot(time_series/3600, pressure_series, 'b-', 'LineWidth', 1.5);
+    xlabel('Time (hours)');
+    ylabel('House Pressure (Pa)');
+    title('House Pressure vs Time');
+    grid on;
+    
+    subplot(4,1,2);
+    plot(time_series/3600, wiper_series, 'm-', 'LineWidth', 1.5);
+    xlabel('Time (hours)');
+    ylabel('Wiper Value');
+    title('Blower Wiper Value vs Time');
+    grid on;
+    
+    subplot(4,1,3);
+    plot(time_series/3600, Qfan_series, 'r-', 'LineWidth', 1.5);
+    xlabel('Time (hours)');
+    ylabel('Blower Flow (CFM)');
+    title('Blower Fan Flow vs Time (HEPA Filter Flow)');
+    grid on;
+    
+    subplot(4,1,4);
+    plot(time_series/3600, error_series, 'k-', 'LineWidth', 1.5);
+    xlabel('Time (hours)');
+    ylabel('Pressure Error (Pa)');
+    title('PI Controller Error vs Time');
+    grid on;
+end
