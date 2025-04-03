@@ -1,0 +1,64 @@
+% Indoor Air Quality Digital Twin using ODE45 with Wall Deposition
+
+% ---------------------------
+% Parameters
+% ---------------------------
+V = 100;               % Indoor volume (m³)
+Q = 50;                % Air exchange rate (m³/h)
+
+% Deposition rate constants from efficiency
+eff_PM3 = 0.35;        % PM1.0–3.0 deposition efficiency
+eff_PM10 = 0.75;       % PM3.0–10.0 deposition efficiency
+k_PM3 = -log(1 - eff_PM3);     % ~0.43 h⁻¹
+k_PM10 = -log(1 - eff_PM10);   % ~1.39 h⁻¹
+
+% Time span for simulation
+tspan = [0, 24];       % Hours
+
+% Outdoor concentration function (diurnal variation)
+C_out_func = @(t) 50 + 10 * sin(pi * t / 12);  % µg/m³
+
+% ---------------------------
+% ODE Definitions
+% ---------------------------
+% PM1.0–3.0 µm
+odefun_PM3 = @(t, C_i) (Q/V) * (C_out_func(t) - C_i) - k_PM3 * C_i;
+
+% PM3.0–10.0 µm
+odefun_PM10 = @(t, C_i) (Q/V) * (C_out_func(t) - C_i) - k_PM10 * C_i;
+
+% Initial indoor concentration
+C0 = 0;
+
+% ---------------------------
+% Solve with ODE45
+% ---------------------------
+[t_PM3, C_i_PM3] = ode45(odefun_PM3, tspan, C0);
+[t_PM10, C_i_PM10] = ode45(odefun_PM10, tspan, C0);
+
+% ---------------------------
+% Evaluate C_out and Steady-State
+% ---------------------------
+C_o_PM3 = C_out_func(t_PM3);
+C_o_PM10 = C_out_func(t_PM10);
+
+C_ss_PM3 = (Q/V) ./ ((Q/V) + k_PM3) .* C_o_PM3;
+C_ss_PM10 = (Q/V) ./ ((Q/V) + k_PM10) .* C_o_PM10;
+
+% ---------------------------
+% Plotting
+% ---------------------------
+figure;
+plot(t_PM3, C_o_PM3, 'k--', 'LineWidth', 1.2, 'DisplayName', 'Outdoor PM');
+hold on;
+plot(t_PM3, C_i_PM3, 'b-', 'LineWidth', 2, 'DisplayName', 'Indoor PM₁.₀–₃.₀ (ODE45)');
+plot(t_PM3, C_ss_PM3, 'b:', 'LineWidth', 1.2, 'DisplayName', 'Steady-State PM₁.₀–₃.₀');
+
+plot(t_PM10, C_i_PM10, 'r-', 'LineWidth', 2, 'DisplayName', 'Indoor PM₃.₀–₁₀.₀ (ODE45)');
+plot(t_PM10, C_ss_PM10, 'r:', 'LineWidth', 1.2, 'DisplayName', 'Steady-State PM₃.₀–₁₀.₀');
+
+xlabel('Time (hours)');
+ylabel('Concentration (µg/m³)');
+title('Indoor Air Quality Digital Twin with Wall Deposition (ODE45)');
+legend('Location', 'best');
+grid on;
