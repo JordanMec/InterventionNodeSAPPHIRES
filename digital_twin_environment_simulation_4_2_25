@@ -1,438 +1,278 @@
-function digital_twin_environment_simulation_combined_updated_CFM_GUI()
-%DIGITAL_TWIN_ENVIRONMENT_SIMULATION_COMBINED_UPDATED_CFM_GUI
-%
-% This digital twin simulation models a home’s response to outdoor conditions
-% by computing:
-%   - Stack effect–induced infiltration (in CFM)
-%   - House pressure using a backward Euler method (in Pa)
-%   - Indoor air quality using a mass balance with deposition
-%   - The energy (in Joules) required to condition the incoming air to a target
-%     indoor temperature of 68°F (293.15 K), and its associated operating cost
-%     (differentiating between cooling via AC and heating via a gas furnace)
-%   - The cumulative duration (in hours) when the outdoor pollutant level
-%     exceeds a target concentration (set by the user via the GUI).
-%
-% Key Equations and Assumptions:
-%
-% 1. Stack Effect Pressure Difference:
-%    deltaP_stack = rho_outdoor * g * H_m_stack * ((T_indoor_K / T_outdoor_K) - 1)
-%       - rho_outdoor: outdoor air density (kg/m^3)
-%       - g: gravitational acceleration (9.81 m/s^2)
-%       - H_m_stack: house height in meters
-%       - T_indoor_K: target indoor temperature (293.15 K)
-%       - T_outdoor_K: current outdoor temperature (K)
-%
-% 2. Stack Effect Infiltration Flow (in CFM):
-%    cfm_stack = abs( sign(deltaP_stack) * CFM50_stack * (abs(deltaP_stack)/50)^n_stack )
-%       - CFM50_stack: blower door leakage rate (CFM at 50 Pa)
-%       - n_stack: leakage exponent for stack effect
-%
-% 3. Home Leakage:
-%    effectiveC = blowerDoorCFM / (50^n_homes)   [CFM/Pa^n]
-%    Q_leak = effectiveC * |DeltaP|^n_leak         [CFM]
-%
-% 4. House Pressure Update (Backward Euler):
-%    p_new = p_old + dt * ((Q_infiltration + Q_int - Q_leak) * convFactor)
-%       - Q_infiltration, Q_int, Q_leak are in CFM, converted to m^3/s via convFactor.
-%
-% 5. Indoor Air Quality:
-%    dC_in/dt = (Q_total/V)*(C_out - C_in) - k_dep * C_in
-%       - Q_total: total ventilation flow (m^3/s)
-%       - V: house volume (m^3)
-%       - k_dep: deposition rate (s^-1)
-%
-% 6. Energy Required to Condition Infiltration Air:
-%    power = Q_inf_m3s * rho * c_p * |T_target - T_outdoor_K|
-%       - Q_inf_m3s: infiltration flow converted from CFM to m^3/s
-%       - rho: air density (1.2 kg/m^3)
-%       - c_p: specific heat capacity (1005 J/(kg·K))
-%       - T_target: target indoor temperature (293.15 K)
-%    For cooling (if T_outdoor_K > T_target), energy required is divided by COP_AC.
-%    For heating (if T_outdoor_K < T_target), energy required is divided by eff_heater.
-%
-% 7. Operating Cost:
-%    - Electricity for cooling:
-%         On-Peak (2-7 p.m.): $0.313/kWh; Off-Peak: $0.0929/kWh.
-%    - Natural Gas for heating:
-%         $1.50 per therm (1 therm = 105.5e6 J).
-%
-% 8. Cumulative Pollution Event Run Time:
-%    - The simulation accumulates time (in seconds) when the outdoor pollutant
-%      concentration exceeds a user-specified target pollutant concentration.
-%
-% Final Figure (3x2 Subplot Grid):
-%   Subplot 1: Outdoor Temperature vs. Time.
-%   Subplot 2: Indoor vs. Outdoor Air Quality vs. Time (with a red dashed line at
-%              the target pollutant concentration).
-%   Subplot 3: Dual y-axis plot for Infiltration Flow (CFM, red) and House Pressure (Pa, magenta).
-%   Subplot 4: Effective Hydraulic Diameter.
-%   Subplot 5: Cumulative Energy Cost to Condition Infiltration Air vs. Time.
-%   Subplot 6: Intervention Node Cumulative Run Time (hours above target pollutant).
-%
-% Author: [Your Name]
-% Date: [Today's Date]
+function digital_twin_environment_simulation_4_2_25()
+% DIGITAL_TWIN_ENVIRONMENT_SIMULATION_4_2_25
+% Updated to integrate correct indoor air quality model using ode45 based on validated physics.
+% Now always sets initial conditions to the proper steady state values,
+% includes a cost model for conditioning infiltration air,
+% uses a user-defined starting OUTDOOR temperature while keeping indoor temperature fixed at 68°F,
+% and modified outdoor AQI fluctuations.
 
 %% Clear Workspace, Command Window, and Close Figures
 clear; clc; close all;
 
 %% --- Initialize Shared Variables ---
-computed_dh = NaN;  % Will store the computed effective hydraulic diameter
+computed_dh = [];
+startingOutdoorTemp_input = 68; % default starting outdoor temperature (°F)
 
 %% --- GUI for Simulation Options ---
-% Default values for GUI inputs:
-fluctuateTemperature = true;    % If true, outdoor temperature fluctuates as a sine wave.
-fluctuatePollution = true;      % If true, outdoor pollutant concentration fluctuates as a sine wave.
-blowerDoorCFM_input = 1150;     % Default blower door leakage rate (CFM at 50 Pa).
-targetPollution_input = 12;     % Default target pollutant concentration (µg/m^3) for intervention.
+fluctuateTemperature = true;
+fluctuatePollution = true;
+blowerDoorCFM_input = 1150;
+targetPollution_input = 12;
 
-max_iter = 10;  % Maximum number of iterations for pressure update convergence
+max_iter = 10;
 
-
-% Create the GUI window.
+% Increase GUI height to accommodate additional field
 guiFig = figure('Name','Simulation Options','NumberTitle','off',...
-    'MenuBar','none','ToolBar','none','Position',[500,500,400,300]);
+    'MenuBar','none','ToolBar','none','Position',[500,500,400,370]);
 
-% Blower door leakage rate input.
+% Blower Door Leakage Rate
 uicontrol('Style','text','String','Blower Door Leakage Rate (CFM @ 50 Pa):',...
-    'Position',[20,250,250,20],'HorizontalAlignment','left','FontSize',10);
+    'Position',[20,320,250,20],'HorizontalAlignment','left','FontSize',10);
 blowerDoorEdit = uicontrol('Style','edit','String','1150',...
-    'Position',[20,225,150,25],'FontSize',10);
+    'Position',[20,295,150,25],'FontSize',10);
 
-% Target pollutant concentration input.
+% Target Pollutant Concentration
 uicontrol('Style','text','String','Target Pollutant Concentration (µg/m^3):',...
-    'Position',[20,190,280,20],'HorizontalAlignment','left','FontSize',10);
+    'Position',[20,270,280,20],'HorizontalAlignment','left','FontSize',10);
 targetPollutionEdit = uicontrol('Style','edit','String','12',...
-    'Position',[20,165,150,25],'FontSize',10);
+    'Position',[20,245,150,25],'FontSize',10);
 
-% Checkbox for fluctuating outdoor temperature.
+% Starting Outdoor Temperature
+uicontrol('Style','text','String','Starting Outdoor Temperature (°F):',...
+    'Position',[20,220,280,20],'HorizontalAlignment','left','FontSize',10);
+startingOutdoorTempEdit = uicontrol('Style','edit','String','68',...
+    'Position',[20,195,150,25],'FontSize',10);
+
+% Checkboxes for fluctuations
 tempCheckbox = uicontrol('Style','checkbox','String','Fluctuate Temperature',...
-    'Value',1,'Position',[20,130,200,30],'FontSize',10);
-
-% Checkbox for fluctuating outdoor air pollution.
+    'Value',1,'Position',[20,160,200,30],'FontSize',10);
 pollutionCheckbox = uicontrol('Style','checkbox','String','Fluctuate Air Pollution',...
-    'Value',1,'Position',[20,95,200,30],'FontSize',10);
+    'Value',1,'Position',[20,125,200,30],'FontSize',10);
 
-% Run Simulation button.
+% Run Simulation Button
 uicontrol('Style','pushbutton','String','Run Simulation',...
-    'Position',[100,30,120,40],'FontSize',10,...
-    'Callback',@runSimCallback);
+    'Position',[100,40,120,40],'FontSize',10,'Callback',@runSimCallback);
 
 uiwait(guiFig);
     function runSimCallback(~, ~)
-        % Retrieve values from GUI controls.
         fluctuateTemperature = logical(get(tempCheckbox,'Value'));
         fluctuatePollution = logical(get(pollutionCheckbox,'Value'));
         blowerDoorCFM_input = str2double(get(blowerDoorEdit,'String'));
         targetPollution_input = str2double(get(targetPollutionEdit,'String'));
+        startingOutdoorTemp_input = str2double(get(startingOutdoorTempEdit,'String'));
         
-        % --- Compute Effective Hydraulic Diameter ---
-        convFactor = 0.000471947;  % 1 CFM = 0.000471947 m^3/s
+        % Compute effective hydraulic diameter using test conditions
+        convFactor = 0.000471947;
         Q50_m3s = blowerDoorCFM_input * convFactor;
         C_coeff = 0.65;
-        deltaP_test = 50;  % Test pressure in Pa.
-        rho_air = 1.2;     % Air density (kg/m^3).
+        deltaP_test = 50;
+        rho_air = 1.2;
         v_test = sqrt((2 * deltaP_test) / rho_air);
         A_eff = Q50_m3s / (C_coeff * v_test);
         computed_dh = sqrt((4 * A_eff) / pi);
         
-        % Display the computed effective hydraulic diameter.
         msg = sprintf('Effective Hydraulic Diameter: %.3f m', computed_dh);
-        msgbox(msg, 'Effective Hydraulic Diameter');
         
         uiresume(guiFig);
         close(guiFig);
     end
 
-%% --- Simulation Parameters ---
-total_time = 21600;         % Total simulation time in seconds (6 hours)
-dt = 1;                     % Time step in seconds
+%% --- Simulation Setup ---
+total_time = 21600; dt = 1;
 num_steps = total_time / dt;
-time = (0:num_steps-1) * dt;  % Time vector (seconds)
+time = (0:num_steps-1) * dt;
 
-%% Conversion Factor
-convFactor = 0.000471947;   % 1 CFM = 0.000471947 m^3/s
+convFactor = 0.000471947;
+houseVolume = 2500 * 0.092903 * (8 * 0.3048);
 
-%% Home & Intervention Parameters
-blowerDoorCFM = blowerDoorCFM_input;  % Blower door leakage rate (CFM)
-n_stack = 0.65;                       % Leakage exponent for stack effect
-CFM50_stack = blowerDoorCFM;          % Baseline stack effect flow (CFM)
-H_ft_stack = 20;                      % House height in feet
-H_m_stack = H_ft_stack * 0.3048;        % House height in meters
-T_indoor_F = 68;                      % Target indoor temperature in °F
-T_indoor_K = (T_indoor_F - 32) * 5/9 + 273.15;  % Target indoor temperature in Kelvin (293.15 K)
-houseVolume = 300;                    % House volume in m^3
+blowerDoorCFM = blowerDoorCFM_input;
+n_stack = 0.65;
+H_m_stack = 15 * 0.3048;
 
-% Intervention node ventilation (mechanical ventilation) in CFM.
-% To let natural draft dominate at time zero, intervention is 0 at t=0.
-Q_intervention = 106;  % CFM for t > 0
+% Indoor temperature is fixed at 68°F (293.15 K)
+T_indoor_K = (68 - 32) * 5/9 + 273.15;
+% T_target remains fixed for energy conditioning (293.15 K = 20°C)
+T_target = 293.15;  
 
-%% Home Leakage Parameters (from blower door test)
-n_homes = 0.65;
-% Compute effective leakage coefficient: effectiveC = blowerDoorCFM/(50^n_homes)
-% [Units: CFM/Pa^n]
-effectiveC = blowerDoorCFM / (50^n_homes);
-n_leak = n_homes;
+effectiveC = blowerDoorCFM / (50^n_stack);
 
-%% Deposition/Removal Rate for Indoor Pollutants
-% Assume a deposition rate of 0.5 h^-1 (converted to s^-1)
-k_dep = 0.5 / 3600;  % s^-1
-
-%% Historical Data (Simulated Placeholders)
-% Outdoor Temperature:
+% Outdoor Temperature: generated using the user-defined starting outdoor temperature as baseline
 if fluctuateTemperature
-    % Use a sine wave with baseline 68°F ±10°F so that at time zero T = 68°F.
-    T_outdoor_data = 68 + 10 * sin(2*pi*(time/total_time));
+    T_outdoor_data = startingOutdoorTemp_input + 10 * sin(2*pi*(time/total_time));
 else
-    T_outdoor_data = 68 * ones(size(time));
+    T_outdoor_data = startingOutdoorTemp_input * ones(size(time));
 end
 
-% Outdoor Pollutant Concentration:
+% Modified outdoor AQI function: 8 peaks during simulation, 30% larger amplitude
 if fluctuatePollution
-    % Use a sine wave oscillation around 12 µg/m^3 with amplitude 2.
-    C_outdoor_data = 12 + 2 * sin(2*pi*(time/total_time));
+    C_outdoor_data = 12 + 2.6 * sin(8*2*pi*(time/total_time));
 else
     C_outdoor_data = zeros(size(time));
 end
 
-%% Target Pollutant Concentration (from GUI)
-targetPollution = targetPollution_input;  % µg/m^3
+targetPollution = targetPollution_input;
 
-%% Pre-allocate Output Arrays
-housePressure = nan(1, num_steps);      % House pressure (Pa, gauge)
-infiltrationFlow = nan(1, num_steps);     % Stack effect infiltration flow (CFM)
-indoorAQ = nan(1, num_steps);             % Indoor pollutant concentration (µg/m^3)
-energyCost = zeros(1, num_steps);         % Cumulative energy cost (in $)
-cumulativePollutionTime = zeros(1, num_steps);  % Cumulative time (seconds) when outdoor pollutant > target
+%% --- Energy Conditioning and Cost Parameters ---
+% Constants for energy required to condition infiltration air
+rho_cond = 1.2;       % Air density (kg/m^3)
+c_p = 1005;           % Specific heat capacity (J/(kg·K))
+COP_AC = 3;           % Coefficient of performance for cooling
+eff_heater = 0.9;     % Efficiency for heating
+startHour = 8;        % Simulation start time (8 AM)
 
-% Set initial indoor air quality (model computed subsequently)
-indoorAQ(1) = 10;
+% Preallocate cumulative cost vector
+cumulativeEnergyCost = zeros(1, num_steps);
 
-%% Constants for Energy Calculation
-rho = 1.2;      % Air density in kg/m^3
-c_p = 1005;     % Specific heat capacity of air in J/(kg·K)
-T_target = T_indoor_K;  % Target indoor temperature (293.15 K)
-COP_AC = 3.0;   % Coefficient of performance for a high-efficiency AC
-eff_heater = 0.95;  % Efficiency of a high-efficiency gas furnace
+%% --- Compute Steady State Initial Conditions ---
+% These conditions are computed based on the t = 0 environment.
+T_outdoor_K_0 = (T_outdoor_data(1) - 32) * 5/9 + 273.15;
+rho_outdoor_0 = 101325 / (287 * T_outdoor_K_0);
+deltaP_stack_0 = rho_outdoor_0 * 9.81 * H_m_stack * ((T_indoor_K / T_outdoor_K_0) - 1);
+cfm_stack_0 = abs(blowerDoorCFM * (abs(deltaP_stack_0) / 50)^n_stack);
+steadyStatePressure = (cfm_stack_0 / effectiveC)^(1/n_stack);
 
-% Electricity cost rates:
-elecCostOnPeak = 0.313;   % $ per kWh (on-peak: 2-7 p.m.)
-elecCostOffPeak = 0.0929; % $ per kWh (off-peak)
-% Gas cost rate for heating:
-gasCostRate = 1.50;  % $ per therm (1 therm = 105.5e6 J)
+% Indoor air quality steady state
+Q_total0 = cfm_stack_0 * convFactor * 3600; % m^3/h at t=0
+C_out0 = C_outdoor_data(1);
 
-% Conversion factors:
-J_to_kWh = 1/3.6e6;      % 1 J = 1/3.6e6 kWh
-J_to_therm = 1/105.5e6;  % 1 J = 1/105.5e6 therm
+k_PM3 = -log(1 - 0.35);
+k_PM10 = -log(1 - 0.75);
 
-%% --- Simulation Loop ---
-% The simulation loop computes, at each time step:
-%  - Outdoor conditions (temperature, pollutant concentration)
-%  - Stack effect pressure difference and infiltration flow (CFM)
-%  - House pressure using a backward Euler update
-%  - Indoor air quality via a mass balance with deposition
-%  - Energy (Joules) required to condition the infiltration air and its cost,
-%    taking into account different electricity rates (on/off-peak) or gas cost.
-%  - Cumulative time (seconds) when outdoor pollutant concentration > targetPollution.
-%
-% We assume the simulation starts at 12:00 PM local time.
-for i = 1:num_steps
-    % For the first time step, set intervention ventilation to 0.
-    if i == 1
-        Q_int_current = 0;  % CFM at t=0
-    else
-        Q_int_current = Q_intervention;  % CFM for t > 0
-    end
-    
-    % --- Outdoor Temperature ---
-    T_outdoor_F = T_outdoor_data(i);  % Current outdoor temperature (°F)
-    T_outdoor_K = (T_outdoor_F - 32)*5/9 + 273.15;  % Convert to Kelvin
-    
-    % --- Outdoor Pollutant Concentration ---
-    C_outdoor = C_outdoor_data(i);  % µg/m^3
-    
-    % --- Accumulate Pollution Event Run Time ---
-    % If the outdoor pollutant concentration exceeds the target, add dt (seconds) to the cumulative counter.
-    if C_outdoor > targetPollution
-        if i == 1
-            cumulativePollutionTime(i) = dt;
-        else
-            cumulativePollutionTime(i) = cumulativePollutionTime(i-1) + dt;
-        end
-    else
-        if i > 1
-            cumulativePollutionTime(i) = cumulativePollutionTime(i-1);
-        end
-    end
-    
-    %% --- Other Physical Constants ---
-g = 9.81;          % Gravitational acceleration in m/s^2
-Patm = 101325;     % Atmospheric pressure in Pa
-R_air = 287;       % Specific gas constant for air in J/(kg·K)
-
-
-tolerance = 1e-6;  % Convergence tolerance for the backward Euler solver
-
-
-
-
-    % --- Compute Outdoor Air Density ---
-    rho_outdoor = Patm / (R_air * T_outdoor_K);  % kg/m^3
-    
-    % --- Compute Stack Effect Pressure Difference ---
-    % Equation: deltaP_stack = rho_outdoor * g * H_m_stack * ((T_indoor_K/T_outdoor_K) - 1)
-    deltaP_stack = rho_outdoor * g * H_m_stack * ((T_indoor_K / T_outdoor_K) - 1);
-    
-    % --- Compute Stack Effect Infiltration Flow (CFM) ---
-    % Compute infiltration flow based on the blower door test, scaled by the pressure difference.
-    cfm_stack = abs( sign(deltaP_stack) * CFM50_stack * (abs(deltaP_stack)/50)^n_stack );
-    Q_infiltration = cfm_stack;  % in CFM
-    
-    % Log infiltration flow.
-    infiltrationFlow(i) = Q_infiltration;
-    
-    % --- Update House Pressure (Backward Euler) ---
-    if i == 1
-        p_old = 0;  % Initially, the equations yield 0 Pa when T_outdoor = T_indoor.
-    else
-        p_old = housePressure(i-1);
-    end
-    p_new = p_old;  % Initial guess (Pa)
-    for iter = 1:max_iter
-        DeltaP_new = p_new;  % Gauge pressure (Pa), with outside = 0
-        % Leakage flow: Q_leak = effectiveC * |DeltaP_new|^n_leak (CFM)
-        Q_leak = effectiveC * (abs(DeltaP_new)^n_leak);
-        if DeltaP_new >= 0
-            leak_effect = Q_leak;
-        else
-            leak_effect = -Q_leak;
-        end
-        % Net flow (CFM): infiltration + intervention - leakage.
-        net_flow_CFM = Q_infiltration + Q_int_current - leak_effect;
-        net_flow_m3s = net_flow_CFM * convFactor;  % Convert to m^3/s.
-        p_next = p_old + dt * net_flow_m3s;
-        if abs(p_next - p_new) < tolerance
-            p_new = p_next;
-            break;
-        end
-        p_new = p_next;
-    end
-    housePressure(i) = p_new;
-    
-    % --- Total Ventilation Flow ---
-    Q_total_CFM = Q_infiltration + Q_int_current;  % in CFM.
-    Q_total_m3s = Q_total_CFM * convFactor;  % in m^3/s.
-    
-    % --- Update Indoor Air Quality (Mass Balance with Deposition) ---
-    if i > 1
-        indoorAQ(i) = indoorAQ(i-1) + dt * ((Q_total_m3s / houseVolume) * (C_outdoor - indoorAQ(i-1)) - k_dep * indoorAQ(i-1));
-    end
-    
-    % --- Energy Calculation for Conditioning Infiltration Air ---
-    % Convert infiltration flow to m^3/s.
-    Q_inf_m3s = Q_infiltration * convFactor;
-    % Temperature difference between target and current outdoor temperature.
-    deltaT = abs(T_target - T_outdoor_K);  % in Kelvin.
-    % Instantaneous thermal energy (power) required (J/s):
-    power = Q_inf_m3s * rho * c_p * deltaT;  % J/s.
-    
-    % Determine whether cooling (if T_outdoor > T_target) or heating is needed.
-    if T_outdoor_K > T_target
-        % Cooling: energy required is reduced by AC COP.
-        ac_power = power / COP_AC;  % Effective electrical power (J/s).
-        % Convert to kWh.
-        ac_kWh = ac_power * J_to_kWh;
-        % Determine local time (simulation starts at 12:00 PM).
-        localTime = 12 + (i-1)/3600;  % in hours.
-        % Apply on-peak rate (2-7 p.m.) or off-peak rate.
-        if localTime >= 14 && localTime < 19
-            elecRate = elecCostOnPeak;
-        else
-            elecRate = elecCostOffPeak;
-        end
-        cost_instant = ac_kWh * elecRate;  % $ per second.
-        coolingCost(i) = cost_instant;
-        heatingCost(i) = 0;
-    elseif T_outdoor_K < T_target
-        % Heating: energy required is reduced by heater efficiency.
-        furnace_power = power / eff_heater;  % J/s.
-        % Convert to therms.
-        gas_therms = furnace_power * J_to_therm;
-        cost_instant = gas_therms * gasCostRate;  % $ per second.
-        heatingCost(i) = cost_instant;
-        coolingCost(i) = 0;
-    else
-        coolingCost(i) = 0;
-        heatingCost(i) = 0;
-    end
-    
-    % Accumulate cost running totals.
-    if i > 1
-        coolingCost(i) = coolingCost(i) + coolingCost(i-1);
-        heatingCost(i) = heatingCost(i) + heatingCost(i-1);
-    end
-    totalCost(i) = coolingCost(i) + heatingCost(i);
+if Q_total0 == 0
+    steadyState_PM3 = 0;
+    steadyState_PM10 = 0;
+else
+    steadyState_PM3 = ((Q_total0/houseVolume) / ((Q_total0/houseVolume) + k_PM3)) * C_out0;
+    steadyState_PM10 = ((Q_total0/houseVolume) / ((Q_total0/houseVolume) + k_PM10)) * C_out0;
 end
 
-%% --- Combined Plot (3x2 Subplot Grid) ---
-figure('Name','Digital Twin Environmental Simulation (CFM)','NumberTitle','off');
+%% --- Simulation Loop ---
+housePressure = nan(1, num_steps);
+infiltrationFlow = nan(1, num_steps);
+cumulativePollutionTime = zeros(1, num_steps);
 
-% Subplot 1: Outdoor Temperature vs. Time
+for i = 1:num_steps
+    % Calculate outdoor temperature in Kelvin for current time step
+    T_outdoor_K = (T_outdoor_data(i) - 32)*5/9 + 273.15;
+    rho_outdoor = 101325 / (287 * T_outdoor_K);
+    deltaP_stack = rho_outdoor * 9.81 * H_m_stack * ((T_indoor_K / T_outdoor_K) - 1);
+    cfm_stack = abs(blowerDoorCFM * (abs(deltaP_stack)/50)^n_stack);
+    infiltrationFlow(i) = cfm_stack;
+    
+    if i == 1
+        housePressure(i) = steadyStatePressure;
+    else
+        housePressure(i) = housePressure(i-1) + dt * (cfm_stack - effectiveC * (abs(housePressure(i-1))^n_stack)) * convFactor;
+    end
+    
+    if C_outdoor_data(i) > targetPollution
+        cumulativePollutionTime(i) = (i > 1) * cumulativePollutionTime(i-1) + dt;
+    elseif i > 1
+        cumulativePollutionTime(i) = cumulativePollutionTime(i-1);
+    end
+    
+    %% Energy Required to Condition Infiltration Air and Operating Cost
+    Q_inf_m3s = infiltrationFlow(i) * convFactor;  % Convert CFM to m^3/s
+    power = Q_inf_m3s * rho_cond * c_p * abs(T_target - T_outdoor_K); % in Watts
+    
+    if T_outdoor_K > T_target  % Cooling required
+        energy = power / COP_AC * dt;  % Energy in Joules for this time step
+        % Determine current time-of-day for electricity pricing
+        current_hour = mod(startHour + time(i)/3600, 24);
+        if current_hour >= 14 && current_hour < 19
+            cost_rate = 0.313;  % On-Peak rate ($/kWh)
+        else
+            cost_rate = 0.0929; % Off-Peak rate ($/kWh)
+        end
+        energy_kWh = energy / 3.6e6;  % Convert Joules to kWh
+        cost = energy_kWh * cost_rate;
+    elseif T_outdoor_K < T_target  % Heating required
+        energy = power / eff_heater * dt;  % Energy in Joules for this time step
+        therms = energy / (105.5e6);        % Convert Joules to therms
+        cost = therms * 1.50;
+    else
+        cost = 0;
+    end
+    
+    if i == 1
+        cumulativeEnergyCost(i) = cost;
+    else
+        cumulativeEnergyCost(i) = cumulativeEnergyCost(i-1) + cost;
+    end
+end
+
+%% Indoor AQ Model using Backward Euler with Wall Deposition (Dynamic Q)
+% Convert simulation time from seconds to hours
+time_hours = time / 3600;
+% Q_total_m3ph: dynamic air exchange rate in m^3/h computed from infiltrationFlow
+Q_total_m3ph = infiltrationFlow * convFactor * 3600;
+
+% Set the time step for the Euler integration in hours
+dt_b = dt / 3600;  % dt was in seconds, so dt_b is in hours
+N_b = length(time_hours);
+
+% Preallocate arrays for indoor concentrations
+C_i_PM3_BE = zeros(1, N_b);
+C_i_PM10_BE = zeros(1, N_b);
+% Use the computed steady state values as the initial conditions
+C_i_PM3_BE(1) = steadyState_PM3;
+C_i_PM10_BE(1) = steadyState_PM10;
+
+for n = 1:(N_b - 1)
+    % Get the dynamic air exchange rate at the next time step (m^3/h)
+    Q_current = Q_total_m3ph(n+1);
+    
+    % Evaluate outdoor concentration at the next time step via interpolation
+    C_out_next = interp1(time_hours, C_outdoor_data, time_hours(n+1), 'linear', 'extrap');
+    
+    % Backward Euler update for PM1.0–3.0
+    C_i_PM3_BE(n+1) = ( C_i_PM3_BE(n) + dt_b*(Q_current/houseVolume)*C_out_next ) / ...
+                       ( 1 + dt_b*((Q_current/houseVolume) + k_PM3) );
+    
+    % Backward Euler update for PM3.0–10.0
+    C_i_PM10_BE(n+1) = ( C_i_PM10_BE(n) + dt_b*(Q_current/houseVolume)*C_out_next ) / ...
+                        ( 1 + dt_b*((Q_current/houseVolume) + k_PM10) );
+end
+
+% For plotting, assign these new values to the indoor AQ variables:
+indoorAQ_PM3 = C_i_PM3_BE;
+indoorAQ_PM10 = C_i_PM10_BE;
+
+
+%% Plotting
+figure('Name','Digital Twin Environmental Simulation (No Intervention)','NumberTitle','off');
 subplot(3,2,1);
-plot(time/3600, T_outdoor_data, 'b-', 'LineWidth', 1.5);
-xlabel('Time (hours)');
-ylabel('Temperature (°F)');
-title('Historical Outdoor Temperature');
-grid on;
+plot(time_hours, T_outdoor_data, 'b-', 'LineWidth', 1.5);
+xlabel('Time (hours)'); ylabel('Temperature (\circF)'); title('Outdoor Temperature'); grid on;
 
-% Subplot 2: Indoor vs. Outdoor Air Quality vs. Time
 subplot(3,2,2);
-plot(time/3600, C_outdoor_data, 'k--', 'LineWidth', 1.5);
-hold on;
-plot(time/3600, indoorAQ, 'g-', 'LineWidth', 1.5);
-% Add a red dashed horizontal line at the target pollutant concentration.
+plot(time_hours, C_outdoor_data, 'k--', 'LineWidth', 1.5); hold on;
+plot(time_hours, indoorAQ_PM3, 'b-', 'LineWidth', 1.5);
+plot(time_hours, indoorAQ_PM10, 'r-', 'LineWidth', 1.5);
 yline(targetPollution, 'r--', 'LineWidth', 1.5);
-xlabel('Time (hours)');
-ylabel('Pollutant Concentration (µg/m^3)');
+xlabel('Time (hours)'); ylabel('Concentration (\mug/m^3)');
 title('Indoor vs Outdoor Air Quality');
-legend('Outdoor (Sine Wave)', 'Indoor', 'Target Pollution','Location','best');
-grid on;
+legend('Outdoor', 'Indoor PM_{1.0-3.0}', 'Indoor PM_{3.0-10.0}', 'Target'); grid on;
 
-% Subplot 3: Dual y-axis Plot for Infiltration Flow and House Pressure
 subplot(3,2,3);
-yyaxis left
-h1 = plot(time/3600, infiltrationFlow, 'r-', 'LineWidth', 1.5);
+yyaxis left; plot(time_hours, infiltrationFlow, 'r-', 'LineWidth', 1.5);
 ylabel('Infiltration Flow (CFM)');
-yyaxis right
-h2 = plot(time/3600, housePressure, 'm-', 'LineWidth', 1.5);
+yyaxis right; plot(time_hours, housePressure, 'm-', 'LineWidth', 1.5);
 ylabel('House Pressure (Pa)');
-xlabel('Time (hours)');
-title('Infiltration Flow and House Pressure');
-legend([h1, h2], {'Infiltration Flow (CFM)', 'House Pressure (Pa)'}, 'Location','best');
-grid on;
+xlabel('Time (hours)'); title('Infiltration & Pressure'); grid on;
 
-% Subplot 4: Display Effective Hydraulic Diameter
-subplot(3,2,4);
-axis off;
-text(0.1,0.5, sprintf('Effective Hydraulic Diameter:\n%.3f m', computed_dh),...
-    'FontSize',12, 'EdgeColor','black', 'BackgroundColor','w');
+subplot(3,2,4); axis off;
+text(0.1,0.5, sprintf('Effective Hydraulic Diameter:\n%.3f m', computed_dh), 'FontSize',12, 'EdgeColor','black', 'BackgroundColor','w');
 title('Effective Hydraulic Diameter');
 
-% Subplot 5: Cumulative Energy Cost to Condition Infiltration Air vs. Time
 subplot(3,2,5);
-plot(time/3600, totalCost, 'c-', 'LineWidth', 1.5);
-xlabel('Time (hours)');
-ylabel('Cumulative Cost ($)');
-title('Cost to Condition Infiltration Air');
-grid on;
+plot(time_hours, cumulativeEnergyCost, 'c-', 'LineWidth', 1.5);
+xlabel('Time (hours)'); ylabel('Cumulative Cost ($)');
+title('Cost to Condition Air'); grid on;
 
-% Subplot 6: Intervention Node Cumulative Run Time
-% Convert cumulative time from seconds to hours.
-cumulativePollutionHours = cumulativePollutionTime / 3600;
 subplot(3,2,6);
-plot(time/3600, cumulativePollutionHours, 'm-', 'LineWidth', 1.5);
-xlabel('Time (hours)');
-ylabel('Cumulative Run Time (hours)');
-title('Intervention Node Cumulative Run Time');
-grid on;
+plot(time_hours, cumulativePollutionTime/3600, 'm-', 'LineWidth', 1.5);
+xlabel('Time (hours)'); ylabel('Cumulative Time (h)');
+title('Pollution Duration'); grid on;
 
 end
