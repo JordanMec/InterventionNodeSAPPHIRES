@@ -1,0 +1,309 @@
+%% Advanced Digital Twin Simulation for Particulate Matter Mixing
+% This script simulates the mixing of particulate matter (PM) in a pressurized
+% space with additional complexities:
+%
+% 1. A HEPA 13 filter that creates a linear pressure loss via Darcy’s law.
+% 2. Envelope leakage losses modeled by a power law.
+% 3. A fan operating point determined by the combined system curve (filter + envelope).
+% 4. A forced exhaust fan that can drive the interior pressure negative (target = -5 Pa).
+%
+% Units:
+% - Flow (Q) in CFM (ft^3/min).
+% - Pressure in inches of water (1 in. H2O ≈ 249 Pa).
+% - Time: dt in hours (converted to minutes when needed).
+% - Volume (V) in ft^3.
+%
+% Adjust any parameters as necessary.
+
+%% Clear workspace and figures
+clear; close all; clc;
+
+%% Fan Curve Data (as provided)
+fan_CFM = [1237, 1156, 1079, 997, 900, 769, 504, 228, 118, 0];
+fan_pressure = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.5, 1.6];  % in inches H2O
+
+figure;
+plot(fan_pressure, fan_CFM, '-o','LineWidth',2);
+xlabel('Pressure (inches of water)');
+ylabel('Flow Rate (CFM)');
+title('Fan Curve: CFM vs. Pressure');
+grid on;
+
+%% Simulation Parameters
+% Time Setup
+t_final = 24;              % total simulation time (hours)
+dt = 1/60;                 % time step (hours) = 1 minute
+time = 0:dt:t_final;       % time vector
+dt_min = dt * 60;          % time step in minutes
+
+% Space and Ventilation Parameters
+V = 10000;                 % room volume in ft^3
+Q_required = 1000;         % required ventilation (CFM) to maintain positive pressure
+
+% Envelope Leakage Parameters (Power Law)
+C_leak_coef = 1150;        % flow coefficient (CFM)
+n_leak = 0.65;             % pressure exponent
+pressure_conv = 100;       % conversion: 100 CFM shortfall -> 1 in. H2O
+
+%% Duct and Filter Parameters (New Features)
+d_inch = 10;               % duct diameter in inches (for forced convection)
+d_ft = d_inch / 12;        % convert to feet
+A_duct = pi*(d_ft/2)^2;    % duct cross-sectional area (ft^2)
+
+% Darcy’s Law for HEPA filter loss:
+% Measured: 250 Pa drop at 2.5 m/s --> ~1 in. H2O at 2.5 m/s.
+% For a given Q (CFM), compute inlet velocity (v) and then:
+%   ΔP_filter (in in. H2O) = (v [m/s] / 2.5) * 1
+% Convert v from ft/s to m/s: 1 ft/s = 0.3048 m/s.
+% v (ft/s) = Q / (A_duct * 60)
+% Therefore:
+%   ΔP_filter = ( (Q/(A_duct*60))*0.3048 / 2.5 )
+K_filter = 0.3048/(A_duct*60*2.5);   % [in. H2O per CFM]
+
+%% Forced Exhaust Fan Parameters (New Feature)
+forced_exhaust_active = true;  % set true to activate forced exhaust
+P_target_Pa = -5;              % target negative pressure (Pa)
+% Convert target pressure to inches H2O (1 in. H2O ≈ 249 Pa)
+P_target_in = P_target_Pa / 249;   % will be negative
+
+%% Determine Fan Operating Point from System Losses
+% The total system pressure loss (in inches H2O) is the sum of:
+% 1. Filter loss: ΔP_filter = K_filter * Q
+% 2. Envelope leakage loss: for positive pressure, assume if Q < Q_required,
+%    then ΔP_env = (Q_required - Q)/pressure_conv, else zero.
+P_envelope = @(Q) max((Q_required - Q),0)/100;   % in inches H2O
+P_total = @(Q) K_filter*Q + P_envelope(Q);
+
+% Fan curve interpolation function: given Q (CFM), returns fan pressure (in in. H2O)
+% (Using provided fan_CFM vs. fan_pressure data.)
+P_fan = @(Q) interp1(fan_CFM, fan_pressure, Q, 'linear', 'extrap');
+
+% Define function to solve: f(Q) = P_fan(Q) - P_total(Q)
+f_fun = @(Q) P_fan(Q) - P_total(Q);
+
+% Use an initial guess. (Note: with these parameters, the system resistance is very high.)
+Q_guess = 100;  % CFM
+options = optimset('Display','off');
+[Q_operating, fval, exitflag] = fzero(f_fun, Q_guess, options);
+
+if exitflag <= 0 || Q_operating < 0
+    warning('No valid operating point found; setting Q_operating = 0.');
+    Q_operating = 0;
+end
+
+% Compute system pressure at operating point
+P_system_operating = P_total(Q_operating);
+fprintf('Operating Q_fan = %.1f CFM, with total system pressure = %.2f in. H2O\n', Q_operating, P_system_operating);
+
+%% Forced Exhaust Calculations (for negative pressure)
+% Under forced exhaust, assume the envelope leakage (infiltration) is governed by:
+%   Q_leak_negative = C_leak_coef * (|P_target_in|)^n_leak
+Q_leak_negative = C_leak_coef * (abs(P_target_in))^n_leak;
+% To force the room to P_target_in, the forced exhaust fan must remove:
+Q_exhaust_required = Q_operating + Q_leak_negative;
+fprintf('To achieve a target pressure of %d Pa (%.3f in. H2O), the forced exhaust must remove an additional %.1f CFM\n', ...
+    P_target_Pa, P_target_in, Q_exhaust_required);
+
+%% Temperature Profile & Mixing Effects
+T_indoor = 68;  % indoor temperature setpoint (°F)
+
+% Outdoor Temperature Profile (°F)
+T_out = zeros(size(time));
+for i = 1:length(time)
+    hr = time(i);
+    if hr <= 14
+        T_out(i) = 68 + (98-68)*(hr/14);
+    elseif hr <= 21
+        T_out(i) = 98 - (98-68)*((hr-14)/7);
+    else
+        T_out(i) = 68;
+    end
+end
+
+% Buoyancy Mixing: mixing increases with the absolute temperature difference.
+k_buoy = 0.01;  % base coefficient (1/hr per °F)
+K_buoy = k_buoy * abs(T_indoor - T_out);  % (1/hr)
+
+% Diffusion Mixing (assumed constant)
+K_diff = 0.1;   % (1/hr)
+
+%% Forced Convection Mixing via 10" Duct (unchanged)
+K_forced = zeros(size(time));  % preallocate (1/hr)
+
+%% Particle Size Bins & Filter Efficiencies
+particle_sizes = [0.3, 0.5, 1, 2.5, 5, 10];  
+numSizes = length(particle_sizes);
+
+% HEPA Filter Efficiency (fraction removed) per size bin
+HEPA_eff = [0.9997, 0.9998, 0.9999, 0.99995, 0.99995, 0.99995];
+
+% Envelope (MERV) Efficiency per size bin
+envelope_eff = [0.2, 0.2, 0.3, 0.5, 0.7, 0.8];
+
+% Maximum Outdoor Concentrations for each size bin (arbitrary units)
+C_out_max = [40, 50, 60, 80, 100, 120];
+
+% Outdoor Particle Concentrations Matrix:
+C_out = zeros(length(time), numSizes);
+for i = 1:length(time)
+    hr = time(i);
+    if hr <= 14
+        frac = hr/14;
+    elseif hr <= 21
+        frac = (21-hr)/7;
+    else
+        frac = 0;
+    end
+    C_out(i, :) = C_out_max * frac;
+end
+
+%% Initialize Indoor Particle Concentration Matrix
+C_in = zeros(length(time), numSizes);  % assume initially clean air
+
+%% Preallocate Flow Arrays and Mixing Coefficient
+% Here, we now use the computed fan operating point.
+Q_fan  = Q_operating * ones(size(time));   % Fan-supplied (filtered) flow (CFM)
+
+% For envelope leakage, we treat two cases:
+% - When forced exhaust is inactive: use the original calculation.
+% - When forced exhaust is active: use Q_leak_negative (from target pressure).
+if forced_exhaust_active
+    current_Q_leak = Q_leak_negative;
+    Q_leak = current_Q_leak * ones(size(time));
+    Q_exhaust = Q_exhaust_required * ones(size(time));
+else
+    Q_leak = zeros(size(time));
+    for n = 1:length(time)
+        if Q_operating < Q_required
+            dP = (Q_required - Q_operating)/pressure_conv; % in inches H2O
+            Q_leak(n) = C_leak_coef * (dP)^n_leak;
+        else
+            Q_leak(n) = 0;
+        end
+    end
+    Q_exhaust = zeros(size(time));
+end
+
+K_mix  = zeros(size(time));   % Effective additional mixing coefficient (1/hr)
+
+%% Simulation Loop Using Backward Euler Method
+% The indoor concentration update for each particle size i becomes:
+%
+%  C_in(n+1, i) = [ C_in(n, i) 
+%           + (dt_min/V) * { Q_leak*(C_leak_in - C_in(n, i)) 
+%                           + Q_fan*(C_fan - C_in(n, i))
+%                           - Q_exhaust * C_in(n,i) } ]
+%                 / [ 1 + (dt_min/V)*(Q_leak+Q_fan+Q_exhaust) + dt*K_mix(n) ]
+%
+% where:
+%   C_fan = (1 - HEPA_eff(i)) * C_out(n, i)   (fan air after HEPA filtering)
+%   C_leak_in = (1 - envelope_eff(i)) * C_out(n, i)  (leakage air after envelope filtering)
+%
+for n = 1:length(time)-1
+    % --- Forced Convection Mixing via 10" Duct ---
+    % Compute inlet velocity: v_in (ft/s) = Q_operating / (A_duct*60), then convert to m/s
+    v_in = Q_operating / A_duct / 60;  % ft/s
+    % Forced convection mixing coefficient: K_forced = (v_in/L_char) converted to 1/hr
+    L_char = 20;  % characteristic room dimension in ft
+    K_forced(n) = (v_in / L_char) * 3600;
+    
+    % --- Total Mixing Coefficient ---
+    K_mix(n) = K_forced(n) + K_buoy(n) + K_diff;
+    
+    % --- Update Indoor Particle Concentration for Each Size Bin ---
+    for i = 1:numSizes
+        % Fan air (after HEPA filtering)
+        C_fan_effective = (1 - HEPA_eff(i)) * C_out(n, i);
+        % Envelope leakage air (after envelope filtering)
+        C_leak_in = (1 - envelope_eff(i)) * C_out(n, i);
+        
+        % Backward Euler Update:
+        C_in(n+1, i) = ( C_in(n, i) ...
+            + (dt_min/V) * ( Q_leak(n)*(C_leak_in - C_in(n, i)) ...
+                           + Q_fan(n)*(C_fan_effective - C_in(n, i)) ...
+                           - Q_exhaust(n)*C_in(n,i) ) ) ...
+            / ( 1 + (dt_min/V)*(Q_leak(n) + Q_fan(n) + Q_exhaust(n)) + dt*K_mix(n) );
+    end
+end
+
+% For consistency, set final time step flows and mixing coefficient equal to the previous step
+Q_fan(end) = Q_fan(end-1);
+Q_leak(end) = Q_leak(end-1);
+Q_exhaust(end) = Q_exhaust(end-1);
+K_mix(end) = K_mix(end-1);
+
+%% Plotting Results
+
+% Plot the fan curve vs. system curve with the operating point.
+figure;
+Q_range = linspace(0, fan_CFM(1), 100);
+plot(Q_range, P_fan(Q_range), 'b-', 'LineWidth', 2); hold on;
+plot(Q_range, P_total(Q_range), 'r--', 'LineWidth', 2);
+plot(Q_operating, P_fan(Q_operating), 'ko', 'MarkerSize', 10, 'MarkerFaceColor', 'k');
+xlabel('Flow Rate (CFM)');
+ylabel('Pressure (inches of water)');
+title('Fan Curve vs. System Curve');
+legend('Fan Curve','System Curve','Operating Point','Location','SouthEast');
+grid on;
+
+% Indoor Particle Concentrations for each particle size
+figure;
+for i = 1:numSizes
+    subplot(numSizes,1,i);
+    plot(time, C_in(:, i), 'LineWidth',2);
+    xlabel('Time (hours)');
+    ylabel(sprintf('PM %g \\mum', particle_sizes(i)));
+    title(sprintf('Indoor PM Concentration: %g \\mum Particles', particle_sizes(i)));
+    grid on;
+end
+
+% Outdoor Particle Concentrations (for reference)
+figure;
+for i = 1:numSizes
+    subplot(numSizes,1,i);
+    plot(time, C_out(:, i), 'LineWidth',2);
+    xlabel('Time (hours)');
+    ylabel(sprintf('PM %g \\mum', particle_sizes(i)));
+    title(sprintf('Outdoor PM Concentration: %g \\mum Particles', particle_sizes(i)));
+    grid on;
+end
+
+% Temperature Profile
+figure;
+plot(time, T_out, 'm','LineWidth',2);
+xlabel('Time (hours)');
+ylabel('Outside Temperature (°F)');
+title('Outside Temperature Profile over 24 Hours');
+grid on;
+
+% Flows and Effective Mixing Coefficient
+figure;
+subplot(3,1,1);
+plot(time, Q_fan, 'g', time, Q_leak, 'c', time, Q_exhaust, 'm', 'LineWidth',2);
+xlabel('Time (hours)');
+ylabel('Flow (CFM)');
+title('Fan Flow, Envelope Leakage, and Forced Exhaust Flow');
+legend('Fan Flow (Filtered)','Envelope Leakage Flow','Forced Exhaust Flow','Location','Best');
+grid on;
+
+subplot(3,1,2);
+plot(time, K_mix, 'k','LineWidth',2);
+xlabel('Time (hours)');
+ylabel('Effective Mixing Coefficient (1/hr)');
+title('Effective Mixing Coefficient (K_{mix} = K_{forced} + K_{buoy} + K_{diff})');
+grid on;
+
+subplot(3,1,3);
+plot(time, T_out, 'm','LineWidth',2);
+xlabel('Time (hours)');
+ylabel('Outside Temperature (°F)');
+title('Outside Temperature Profile');
+grid on;
+
+%% Final Comments:
+% - This modified script includes the linear HEPA filter loss using Darcy's law.
+% - Envelope leakage losses are modeled by a power law.
+% - The fan operating point is determined by the intersection of the fan curve and the system losses.
+% - When forced exhaust is active, the script computes the extra removal needed to force the home to a target negative pressure (-5 Pa).
+%
+% Adjust parameters as needed to best represent your real-world system.
