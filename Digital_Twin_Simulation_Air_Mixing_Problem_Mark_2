@@ -1,0 +1,264 @@
+%% Digital Twin Simulation using Fick's Law for PM Mixing + Fan Curve Integration
+% This script simulates indoor particulate matter (PM) concentrations over a 24-hour
+% period. It uses an enhanced outdoor PM simulation (including urban traffic and wildfire effects),
+% a diffusion model based on Fick's Law, and fan-based ventilation. Natural removal processes 
+% (gravitational settling, surface deposition, and coagulation) are included and can be corrected 
+% for ambient humidity and temperature. A GUI is provided to adjust key parameters.
+%
+% Ambient and aerosol corrections are based on peer-reviewed sources:
+% MLA Citations:
+%   Hinds, W. C. Aerosol Technology: Properties, Behavior, and Measurement of Airborne Particles. Wiley-Interscience, 1999.
+%   Seinfeld, John H., and Spyros N. Pandis. Atmospheric Chemistry and Physics: From Air Pollution to Climate Change. Wiley, 2006.
+%
+% SI units are used throughout.
+%
+% Written by: [Your Name]
+% Date: [Today's Date]
+
+%% Clear Workspace and Initialize
+clear; close all; clc;
+
+%% GUI for Parameter Adjustment
+% Create the figure window for the GUI.
+f = figure('Name', 'Simulation Parameter Setup', 'NumberTitle', 'off', ...
+    'Position', [100, 100, 400, 300]);
+
+% --- Slider for Outdoor PM Concentration ---
+% This slider scales a baseline PM vector for all six particle sizes. The slider
+% range is set from 0 μg/m³ (clean air, AQI 0) up to 500 μg/m³ (extreme pollution, AQI 500).
+slider_label = uicontrol('Parent', f, 'Style', 'text', ...
+    'Position', [50, 240, 300, 20], ...
+    'String', 'Outdoor PM for Largest Particle (μg/m³):');
+slider_pm = uicontrol('Parent', f, 'Style', 'slider', ...
+    'Min', 0, 'Max', 500, 'Value', 45, ...
+    'Position', [50, 220, 300, 20], 'SliderStep', [0.01 0.1]);
+
+% --- Checkbox for Natural Removal Mechanisms ---
+% This checkbox toggles the natural removal mechanisms (gravitational settling,
+% surface deposition, and coagulation) on (checked) or off (unchecked).
+checkbox_nr = uicontrol('Parent', f, 'Style', 'checkbox', 'Value', 1, ...
+    'Position', [50, 180, 300, 20], ...
+    'String', 'Enable Natural Removal Mechanisms');
+
+% --- Button to Run the Simulation ---
+% The button’s callback passes the slider and checkbox handles to the function.
+btn_run = uicontrol('Parent', f, 'Style', 'pushbutton', 'String', 'Run Simulation', ...
+    'Position', [150, 120, 100, 40], ...
+    'Callback', @(src,event) runSimulationCallback(slider_pm, checkbox_nr));
+
+%% Callback Function for the Run Simulation Button
+function runSimulationCallback(slider_handle, checkbox_handle)
+    % Retrieve the slider value (μg/m³ for the largest particle baseline)
+    slider_val = get(slider_handle, 'Value');
+    % Original baseline for the largest particle is 45 μg/m³.
+    % Compute a multiplier so that all particle sizes scale proportionally.
+    multiplier = slider_val / 45;  
+    % Original baseline vector for all six particle sizes
+    original_baseline = [20, 25, 30, 35, 40, 45];
+    % Scale the baseline PM vector:
+    baseline_PM = original_baseline * multiplier;
+    
+    % Retrieve the checkbox value (1 = natural removal enabled, 0 = disabled)
+    nr_enabled = get(checkbox_handle, 'Value');  
+    
+    % Close the GUI window after collecting parameters.
+    close(gcf);
+    
+    % Run the main simulation using the selected parameters.
+    runMainSimulation(baseline_PM, nr_enabled);
+end
+
+%% Main Simulation Function
+% This function runs the simulation using the given outdoor PM baseline vector
+% and the natural removal toggle flag.
+function runMainSimulation(baseline_PM, nr_enabled)
+    %% Ambient Conditions and Correction Parameters
+    % Define ambient temperature and relative humidity.
+    T = 298;       % Ambient temperature in Kelvin (~25°C)
+    RH = 0.70;     % Relative Humidity (70%)
+    T_ref = 298;   % Reference temperature in Kelvin
+    
+    % Empirical parameter for hygroscopic growth (typical for urban aerosols)
+    kappa = 0.3;
+    
+    % κ-Köhler Equation for Hygroscopic Growth Factor (GF):
+    %   GF = (1 + kappa * (RH/(1 - RH)))^(1/3)
+    % GF is the ratio of the wet particle diameter to the dry diameter.
+    GF = (1 + kappa * (RH/(1-RH)))^(1/3);
+    
+    %% Dry-Condition Natural Removal Rates (Base Rates)
+    % Units: 1/s
+    % Gravitational Settling: Larger particles settle faster.
+    k_gravity = [1e-6, 2e-6, 5e-6, 1e-5, 2e-5, 5e-5];
+    
+    % Surface Deposition: Represents impaction and diffusion onto surfaces.
+    k_surface = [2e-6, 3e-6, 4e-6, 6e-6, 8e-6, 1e-5];
+    
+    % Coagulation: Particle collisions leading to agglomeration.
+    k_coag = [1e-6, 1e-6, 2e-6, 2e-6, 2e-6, 3e-6];
+    
+    %% Adjust Removal Rates for Ambient Humidity and Temperature
+    % For gravitational settling and surface deposition, which scale as (diameter)²,
+    % multiply by GF².
+    k_gravity_corr = k_gravity * GF^2;
+    k_surface_corr = k_surface * GF^2;
+    
+    % For coagulation, apply a temperature correction scaling with sqrt(T/T_ref).
+    k_coag_corr = k_coag * sqrt(T/T_ref);
+    
+    % Overall corrected natural removal rate for each particle size:
+    k_natural_loss_corr = k_gravity_corr + k_surface_corr + k_coag_corr;
+    
+    %% Simulation Time Setup
+    t_final = 24;              % Total simulation time in hours
+    dt = 1/60;                 % Time step in hours (1 minute)
+    time = 0:dt:t_final;       % Time vector
+    dt_s = dt * 3600;          % Time step in seconds
+    
+    %% Indoor Air Volume Calculation (SI Units)
+    % Floor area of 232.2576 m² (2500 ft²) and ceiling height of 2.4384 m.
+    floor_area = 232.2576;     
+    ceiling_height = 2.4384;   
+    V_m3 = floor_area * ceiling_height;  % Indoor air volume (~566.33 m³)
+    
+    %% Particle Sizes and Related Settings
+    particle_sizes = [0.3, 0.5, 1, 2.5, 5, 10];  % Particle sizes in microns
+    numSizes = length(particle_sizes);
+    numSteps = length(time);
+    
+    %% Enhanced Outdoor PM Concentration Simulation
+    % Generate a synthetic outdoor PM profile using:
+    % - The baseline vector scaled via the GUI,
+    % - Two Gaussian peaks (morning and evening traffic),
+    % - A wildfire event from 12:00 to 20:00,
+    % - Random noise to simulate variability.
+    %
+    % 'baseline_PM' (a 1x6 vector) was provided by the GUI.
+    amp_morning = 40;          % Amplitude for morning traffic peak
+    amp_evening = 50;          % Amplitude for evening traffic peak
+    peak_morning_center = 8;   % Morning peak at 8 AM
+    peak_evening_center = 18;  % Evening peak at 6 PM
+    sigma_morning = 1;         % Spread of morning peak
+    sigma_evening = 1.5;       % Spread of evening peak
+    
+    % Preallocate the outdoor concentration matrix.
+    C_out = zeros(numSteps, numSizes);
+    for t = 1:numSteps
+        hr = time(t);
+        % Gaussian peaks for traffic:
+        traffic_effect = amp_morning * exp(-((hr - peak_morning_center)^2) / (2*sigma_morning^2)) + ...
+                         amp_evening * exp(-((hr - peak_evening_center)^2) / (2*sigma_evening^2));
+        % Wildfire effect between 12:00 and 20:00:
+        if hr >= 12 && hr <= 20
+             wildfire_effect = [100, 120, 140, 160, 180, 200];
+        else
+             wildfire_effect = zeros(1, numSizes);
+        end
+        % Random noise (5% of baseline) for sensor variability:
+        noise = baseline_PM * 0.05 .* randn(1, numSizes);
+        
+        % Total outdoor PM concentration (ensuring non-negative values):
+        C_out(t, :) = max(baseline_PM + traffic_effect + wildfire_effect + noise, 0);
+    end
+    
+    %% Fan Curve and Ventilation Setup
+    % Define a fan curve (flow rate vs. pressure) and compute the operating point.
+    fan_CFM = [1237, 1156, 1079, 997, 900, 769, 504, 228, 118, 0];   % Flow rates in CFM
+    fan_pressure_inH2O = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.5, 1.6];  % Pressure in in. H2O
+    fan_pressure_Pa = fan_pressure_inH2O * 249;  % Convert to Pascals
+    
+    figure;
+    plot(fan_CFM, fan_pressure_Pa, '-o', 'LineWidth', 2);
+    xlabel('Flow Rate (CFM)'); ylabel('Fan Pressure (Pa)');
+    title('Fan Curve: Pressure vs. Flow Rate'); grid on;
+    
+    % Duct and filter parameters (these remain as in the original example)
+    d_inch = 10;                           % Duct diameter in inches
+    d_ft = d_inch / 12;                    % Convert to feet
+    A_duct = pi*(d_ft/2)^2;                % Duct cross-sectional area (ft²)
+    K_filter = 0.3048 / (A_duct * 60 * 2.5); % HEPA filter loss coefficient (in. H2O/CFM)
+    Q_required = 1000;                     % Minimum required ventilation flow (CFM)
+    pressure_conv = 100;                   % Pressure scaling factor
+    P_envelope = @(Q) max((Q_required - Q), 0) / pressure_conv;
+    P_total_inH2O = @(Q) K_filter * Q + P_envelope(Q);
+    P_total_Pa = @(Q) P_total_inH2O(Q) * 249;
+    P_fan = @(Q) interp1(fan_CFM, fan_pressure_Pa, Q, 'linear', 'extrap');
+    f_fun = @(Q) P_fan(Q) - P_total_Pa(Q);
+    [Q_operating, ~, exitflag] = fzero(f_fun, 100, optimset('Display','off'));
+    if exitflag <= 0 || Q_operating < 0
+        warning('No valid fan operating point found. Setting Q_operating = 0.');
+        Q_operating = 0;
+    end
+    P_operating = P_fan(Q_operating);
+    fprintf('Fan Operating Flow: %.1f CFM\n', Q_operating);
+    fprintf('System Pressure at Operating Point: %.2f Pa\n', P_operating);
+    
+    %% Indoor PM Concentration Simulation Using Fick's Law
+    % Define Fick's Law parameters.
+    A_diff = 0.02;      % Effective leakage area (m²)
+    D = 1e-5;           % Particle diffusivity (m²/s)
+    L_wall = 0.1;       % Wall thickness (m)
+    
+    % Preallocate indoor concentration arrays.
+    C_in = zeros(numSteps, numSizes);          % Full model: includes diffusion and removal
+    C_natural_only = zeros(numSteps, numSizes);  % Model with only natural removal (no diffusion)
+    
+    % Loop through time steps and particle sizes.
+    for n = 1:numSteps-1
+        for i = 1:numSizes
+            % Fick's Law diffusion coefficient:
+            k_fick = (D * A_diff) / (L_wall * V_m3);
+            % Total removal rate includes diffusion plus natural removal (if enabled).
+            k_total = k_fick + (k_natural_loss_corr(i) * nr_enabled);
+            
+            % Update using an implicit scheme:
+            C_in(n+1, i) = (C_in(n, i) + dt_s * k_fick * C_out(n, i)) / (1 + dt_s * k_total);
+            % Update for the natural removal only model:
+            C_natural_only(n+1, i) = C_natural_only(n, i) / (1 + dt_s * (k_natural_loss_corr(i) * nr_enabled));
+        end
+    end
+    
+    %% Plotting Results
+    % Plot Indoor PM Concentrations (Full Model)
+    figure;
+    for i = 1:numSizes
+        subplot(numSizes, 1, i);
+        plot(time, C_in(:, i), 'b-', 'LineWidth', 2);
+        xlabel('Time (hours)');
+        ylabel(sprintf('PM %g μm', particle_sizes(i)));
+        title(sprintf('Indoor PM Concentration: %g μm (Full Model)', particle_sizes(i)));
+        grid on;
+    end
+    
+    % Plot Indoor PM Concentrations (Natural Removal Only)
+    figure;
+    for i = 1:numSizes
+        subplot(numSizes, 1, i);
+        plot(time, C_natural_only(:, i), 'k-', 'LineWidth', 2);
+        xlabel('Time (hours)');
+        ylabel(sprintf('PM %g μm', particle_sizes(i)));
+        title(sprintf('Indoor PM: %g μm (Natural Removal Only)', particle_sizes(i)));
+        grid on;
+    end
+    
+    % Plot Outdoor PM Concentration for Each Particle Size
+    figure;
+    for i = 1:numSizes
+        subplot(numSizes, 1, i);
+        plot(time, C_out(:, i), 'r-', 'LineWidth', 2);
+        xlabel('Time (hours)');
+        ylabel(sprintf('PM %g μm', particle_sizes(i)));
+        title(sprintf('Simulated Outdoor PM Concentration for %g μm', particle_sizes(i)));
+        grid on;
+    end
+    
+    % Plot stacked bar chart for Corrected Natural Removal Mechanisms
+    figure;
+    bar(particle_sizes', [k_gravity_corr' k_surface_corr' k_coag_corr'], 'stacked');
+    xlabel('Particle Size (μm)'); ylabel('Removal Rate (1/s)');
+    title('Corrected Natural Particle Removal Rates by Mechanism');
+    legend('Gravitational Settling', 'Surface Deposition', 'Coagulation'); grid on;
+    
+    fprintf('Simulation complete with baseline_PM = [%s] and Natural Removal Enabled = %d\n', ...
+        num2str(baseline_PM), nr_enabled);
+end
