@@ -1,0 +1,270 @@
+function total_pressure_loss_sliders_checkboxes_value_10_EC_PrioAir()
+    %% Clear previous variables and close figures
+    clear;
+    clc;
+    close all;
+
+    %% Given parameters
+    n = 0.65;              % Power-law exponent (fixed)
+    D_h_inches = 10;       % Duct diameter in inches
+
+    % Range for the top-plot simulation (CFM)
+    flow_rate_CFM = linspace(0, 1300, 100);
+
+    % Range for the bottom plot (blower door test results, Q at 50 Pa)
+    leakage_rate_range = linspace(0, 4000, 100);  % now starts at 0
+
+    % Initialize slider variables (for the top plot only)
+    C_value = 78.6;        % Homes loss coefficient (adjustable for the top plot)
+    filter_pressure_drop = 1.2136;  % Filter loss slope (Pa/CFM)
+    L = 130;               % Duct length (ft)
+
+    % Checkbox states
+    use_duct_loss = true;
+    use_homes_loss = true;
+    use_filter_loss = true;
+
+    % Fixed fan performance data (PrioAir EC 10 Fan):
+    fixed_flow_rate_CFM = [1237, 1156, 1079, 997, 900, 769, 118, 0];
+    fixed_pressure_Pa   = [0,    49.8,  99.5, 149, 199, 248.8,374,399];
+
+    %% Create Plot Figure with Toolbar enabled for interactive zoom/pan
+    plotFig = figure('Name', 'Plot Figure', 'NumberTitle', 'off', ...
+                     'Position', [100 150 800 700], 'Toolbar', 'figure');
+    
+    % Top Plot: Total Pressure Loss vs Flow Rate (slightly reduced vertical space)
+    ax_total = axes('Parent', plotFig, 'Position', [0.13, 0.55, 0.775, 0.35]);
+    hold(ax_total, 'on');
+    xlabel(ax_total, 'Flow Rate (Q) [CFM]');
+    ylabel(ax_total, 'Pressure (P) [Pa]');
+    title(ax_total, 'Total Pressure Loss vs Flow Rate');
+    grid(ax_total, 'on');
+    xlim(ax_total, [0 1300]);
+    ylim(ax_total, [0 400]);
+
+    total_plot = plot(ax_total, flow_rate_CFM, zeros(size(flow_rate_CFM)), 'b-', ...
+                      'LineWidth', 2, 'DisplayName', 'Total Pressure Loss');
+    fixed_line_plot = plot(ax_total, fixed_flow_rate_CFM, fixed_pressure_Pa, 'r--', ...
+                           'LineWidth', 2, 'DisplayName', 'PrioAir EC 10 Fan');
+    legend(ax_total, 'show');
+
+    % Bottom Plot: Achievable Pressure vs Home Leakage Rate (increased vertical space)
+    ax_leakage = axes('Parent', plotFig, 'Position', [0.13, 0.05, 0.775, 0.45]);
+    hold(ax_leakage, 'on');
+    xlabel(ax_leakage, 'Home Leakage Rate (Q at 50 Pa) [CFM]');
+    ylabel(ax_leakage, 'Achievable Pressure (P) [Pa]');
+    title(ax_leakage, 'Achievable Pressure vs Home Leakage Rate');
+    grid(ax_leakage, 'on');
+    xlim(ax_leakage, [0, 4000]);  % now starting from 0 CFM
+    ylim(ax_leakage, [0, 420]);    % extend y-axis so maximum fan pressure (≈400 Pa) is visible
+
+    leakage_plot = plot(ax_leakage, leakage_rate_range, zeros(size(leakage_rate_range)), 'm-', ...
+                        'LineWidth', 2, 'DisplayName', 'Achievable Pressure vs Home Leakage');
+    legend(ax_leakage, 'show');
+
+    %% Create Control Panel Figure (GUI controls) - still with toolbar disabled here
+    controlFig = figure('Name', 'Control Panel', 'NumberTitle', 'off', ...
+                        'Position', [950 300 500 300], 'Toolbar', 'none');
+    controlPanel = uipanel('Parent', controlFig, 'Units', 'pixels', 'Position', [0 0 500 300]);
+
+    %% Layout for GUI Controls in the Control Panel
+    % --- Row for C Slider (affects TOP plot only) ---
+    uicontrol('Parent', controlPanel, 'Style', 'text', 'Position', [20, 280, 160, 20], ...
+              'String', 'Tight Home: Low C (e.g., 250 CFM @ 50 Pa)');
+    uicontrol('Parent', controlPanel, 'Style', 'text', 'Position', [320, 280, 160, 20], ...
+              'String', 'Leaky Home: High C (e.g., 4000 CFM @ 50 Pa)');
+    uicontrol('Parent', controlPanel, 'Style', 'text', 'Position', [200, 260, 100, 20], ...
+              'String', 'Adjust C');
+    slider_C = uicontrol('Parent', controlPanel, 'Style', 'slider', 'Min', 39, 'Max', 315, 'Value', C_value, ...
+                         'Position', [50, 230, 400, 20], 'Callback', @(src, event) updateTopPlot());
+    
+    % --- Row for Filter Pressure Drop Slider (affects BOTH plots)
+    uicontrol('Parent', controlPanel, 'Style', 'text', 'Position', [20, 210, 80, 20], ...
+              'String', 'MERV 13');
+    uicontrol('Parent', controlPanel, 'Style', 'text', 'Position', [400, 210, 80, 20], ...
+              'String', 'HEPA 10');
+    uicontrol('Parent', controlPanel, 'Style', 'text', 'Position', [180, 190, 120, 20], ...
+              'String', 'Filter Pressure Drop');
+    slider_filter = uicontrol('Parent', controlPanel, 'Style', 'slider', 'Min', 0.5287, 'Max', 1.2136, 'Value', filter_pressure_drop, ...
+                              'Position', [50, 160, 400, 20], 'Callback', @(src, event) updateBoth());
+
+    % --- Row for Duct Length Slider (affects BOTH plots)
+    uicontrol('Parent', controlPanel, 'Style', 'text', 'Position', [20, 140, 40, 20], 'String', '30');
+    uicontrol('Parent', controlPanel, 'Style', 'text', 'Position', [440, 140, 40, 20], 'String', '600');
+    uicontrol('Parent', controlPanel, 'Style', 'text', 'Position', [200, 120, 100, 20], 'String', 'Duct Length');
+    slider_length = uicontrol('Parent', controlPanel, 'Style', 'slider', 'Min', 30, 'Max', 600, 'Value', L, ...
+                              'Position', [50, 90, 400, 20], 'Callback', @(src, event) updateBoth());
+
+    % --- Row for Displaying Slider Values ---
+    label_C = uicontrol('Parent', controlPanel, 'Style', 'text', 'Position', [50, 60, 100, 20], ...
+                          'String', ['C: ' num2str(C_value)]);
+    label_filter = uicontrol('Parent', controlPanel, 'Style', 'text', 'Position', [200, 60, 150, 20], ...
+                             'String', ['Filter: ' num2str(filter_pressure_drop, '%.4f') ' slope']);
+    label_length = uicontrol('Parent', controlPanel, 'Style', 'text', 'Position', [370, 60, 120, 20], ...
+                             'String', ['Length: ' num2str(L) ' ft']);
+
+    % --- Row for Top-Plot Operating Point ---
+    x_intercept_display = uicontrol('Parent', controlPanel, 'Style', 'text', 'Position', [50, 30, 200, 20], ...
+                                    'String', 'Flow Rate (Q): 0 CFM', 'FontSize', 10);
+    y_value_display = uicontrol('Parent', controlPanel, 'Style', 'text', 'Position', [260, 30, 220, 20], ...
+                                'String', 'Achievable Pressure: 0 Pa', 'FontSize', 10);
+
+    % --- Row for Checkboxes (all three, now clearly visible)
+    uicontrol('Parent', controlPanel, 'Style', 'checkbox', 'Position', [50, 0, 150, 20], ...
+              'String', 'Use Duct Pressure Loss', 'Value', use_duct_loss, 'Callback', @(src, event) toggleDuctLoss(src));
+    uicontrol('Parent', controlPanel, 'Style', 'checkbox', 'Position', [210, 0, 150, 20], ...
+              'String', 'Use Homes Pressure Loss', 'Value', use_homes_loss, 'Callback', @(src, event) toggleHomesLoss(src));
+    uicontrol('Parent', controlPanel, 'Style', 'checkbox', 'Position', [370, 0, 150, 20], ...
+              'String', 'Use Filter Pressure Drop', 'Value', use_filter_loss, 'Callback', @(src, event) toggleFilterLoss(src));
+
+    %% Update Functions
+    % updateTopPlot updates only the top plot (the C slider should only affect the top plot)
+    function updateTopPlot()
+        % Get current slider values from control panel
+        C_value = get(slider_C, 'Value');
+        filter_pressure_drop = get(slider_filter, 'Value');
+        L = get(slider_length, 'Value');
+        set(label_C, 'String', ['C: ' num2str(round(C_value))]);
+        set(label_filter, 'String', ['Filter: ' num2str(filter_pressure_drop, '%.4f') ' slope']);
+        set(label_length, 'String', ['Length: ' num2str(round(L)) ' ft']);
+        
+        % Compute total pressure loss for top plot
+        total_pressure_drop_Pa = zeros(size(flow_rate_CFM));
+        if use_duct_loss
+            duct_loss = 0.2717287 * (flow_rate_CFM.^1.9) / (D_h_inches^5.02) * L;
+            total_pressure_drop_Pa = total_pressure_drop_Pa + duct_loss;
+        end
+        if use_homes_loss
+            homes_loss = (flow_rate_CFM / C_value).^(1/n);
+            total_pressure_drop_Pa = total_pressure_drop_Pa + homes_loss;
+        end
+        if use_filter_loss
+            filter_loss = filter_pressure_drop * flow_rate_CFM;
+            total_pressure_drop_Pa = total_pressure_drop_Pa + filter_loss;
+        end
+        
+        set(total_plot, 'YData', total_pressure_drop_Pa);
+        drawnow;
+        % Update operating point information from top plot
+        findIntersectionAndUpdateText(total_plot, fixed_line_plot, C_value);
+    end
+
+    % updateBoth updates both the top and bottom plots (for controls that affect system losses)
+    function updateBoth()
+        updateTopPlot();
+        updateBottomPlot();
+    end
+
+    %% Helper: Compute operating point (intersection of total curve and fixed fan curve)
+    function findIntersectionAndUpdateText(total_plot, fixed_line_plot, C_value)
+        total_pressure_y = get(total_plot, 'YData');
+        total_flow_rate_x = get(total_plot, 'XData');
+        fixed_pressure_y = get(fixed_line_plot, 'YData');
+        fixed_flow_rate_x = get(fixed_line_plot, 'XData');
+        
+        % Interpolate the fixed fan curve to computed curve's domain
+        interpolated_fixed_pressure = interp1(fixed_flow_rate_x, fixed_pressure_y, total_flow_rate_x, 'linear', 'extrap');
+        [~, idx] = min(abs(total_pressure_y - interpolated_fixed_pressure));
+        operating_flow = total_flow_rate_x(idx);
+        operating_pressure = total_pressure_y(idx);
+        
+        set(x_intercept_display, 'String', ['Flow Rate (Q): ' num2str(operating_flow, '%.2f') ' CFM']);
+        set(y_value_display, 'String', ['Achievable Pressure: ' num2str(operating_pressure, '%.2f') ' Pa']);
+        
+        % Compute system losses (from duct and filter)
+        if use_duct_loss
+            duct_loss_op = 0.2717287 * (operating_flow^1.9) / (D_h_inches^5.02) * L;
+        else
+            duct_loss_op = 0;
+        end
+        if use_filter_loss
+            filter_loss_op = filter_pressure_drop * operating_flow;
+        else
+            filter_loss_op = 0;
+        end
+        systemLoss = duct_loss_op + filter_loss_op;
+        
+        % Store system losses and current operating pressure for bottom plot updates
+        setappdata(plotFig, 'systemLoss', systemLoss);
+        setappdata(plotFig, 'p_initial', operating_pressure);
+    end
+
+    %% Helper: Update Bottom Plot (Achievable Pressure vs Home Leakage Rate)
+    function updateBottomPlot()
+        systemLoss = getappdata(plotFig, 'systemLoss');
+        p0 = getappdata(plotFig, 'p_initial');
+        
+        % Define effective fan flow function (shifts fixed fan curve by systemLoss)
+        effectiveFanFlow = @(p) interp1(fixed_pressure_Pa, fixed_flow_rate_CFM, p + systemLoss, 'linear', 'extrap');
+        
+        achievablePressure = zeros(size(leakage_rate_range));
+        last_valid = NaN;  % store last valid solution
+        % Loop through each blower door leakage value (Q at 50 Pa)
+        for i = 1:length(leakage_rate_range)
+            Q_meas = leakage_rate_range(i);
+            % Compute home's envelope coefficient using the blower door power law:
+            % Q_meas = C_home*(50^n)  ==>  C_home = Q_meas/(50^n)
+            if Q_meas > 0
+                C_home = Q_meas / (50^n);
+            else
+                % For Q_meas==0, set a very low but nonzero C_home to allow max pressure
+                C_home = 1e-6;
+            end
+            % Home envelope: Q_home(p) = C_home * p^n.
+            % Solve: effectiveFanFlow(p) = C_home * p^n.
+            F = @(p) effectiveFanFlow(p) - (C_home * p^n);
+            
+            % Bracket search: try to find a valid interval for fzero
+            p_lower = 0;
+            p_upper = max([p0, 1]);
+            max_iter = 20;
+            iter = 0;
+            while iter < max_iter && F(p_upper) > 0
+                p_upper = p_upper * 2;
+                iter = iter + 1;
+            end
+            if F(p_lower)*F(p_upper) < 0
+                try
+                    p_solution = fzero(F, [p_lower, p_upper]);
+                    if p_solution < 0, p_solution = 0; end
+                    last_valid = p_solution;
+                catch
+                    if ~isnan(last_valid)
+                        p_solution = last_valid;
+                    else
+                        p_solution = 0;
+                    end
+                end
+            else
+                if ~isnan(last_valid)
+                    p_solution = last_valid;
+                else
+                    p_solution = 0;
+                end
+            end
+            achievablePressure(i) = p_solution;
+        end
+        
+        set(leakage_plot, 'YData', achievablePressure);
+        drawnow;
+    end
+
+    %% Callback functions for check boxes
+    function toggleDuctLoss(src)
+        use_duct_loss = get(src, 'Value');
+        updateBoth();
+    end
+
+    function toggleHomesLoss(src)
+        use_homes_loss = get(src, 'Value');
+        updateBoth();
+    end
+
+    function toggleFilterLoss(src)
+        use_filter_loss = get(src, 'Value');
+        updateBoth();
+    end
+
+    % Initial update call so that plots are displayed
+    updateBoth();
+end
