@@ -1,0 +1,595 @@
+function Integrated_DigitalTwin_Simulation()
+%% Integrated Digital Twin Simulation of Indoor Air Dynamics and Forced Air Movement
+% This script merges two models:
+%   1. An interactive HVAC/home leakage analysis (using a fan curve, duct/filter losses,
+%      and envelope leakage).
+%   2. A dynamic indoor PM simulation that models infiltration, mixing,
+%      natural removal, and exhaust.
+%
+% The HVAC module computes the fan operating point (flow rate Q and pressure P)
+% that balances injection and exhaust. That forced air rate (converted to SI units)
+% is then used in a 24‑hour indoor air quality mass–balance model.
+%
+% Natural removal processes are corrected for ambient conditions. In particular,
+% gravitational removal is explicitly calculated using the ceiling height.
+%
+% In future applications, you may wish to replace the simulated temperature, humidity,
+% and AQI (PM) data with external measurements (e.g. from NASA or Purple Air). Sample
+% code for reading external files is provided (but commented out).
+%
+% MLA Citations (in comments):
+%   Hinds, W. C. Aerosol Technology: Properties, Behavior, and Measurement of Airborne Particles. Wiley-Interscience, 1999.
+%   Seinfeld, John H., and Spyros N. Pandis. Atmospheric Chemistry and Physics: From Air Pollution to Climate Change. Wiley, 2006.
+%
+% SI units are used throughout.
+%
+% Written by: [Your Name]
+% Date: [Today's Date]
+
+%% Clear Workspace and Initialize
+clear; clc; close all;
+
+%% =========================
+%% Part A: HVAC / Fan & Home Leakage Analysis (Interactive GUI)
+%% =========================
+
+% Parameters for home leakage and duct/fan calculations:
+n = 0.65;              % Power-law exponent for leakage
+D_h_inches = 10;       % Duct diameter in inches
+
+% Range for the top-plot simulation (Flow rate in CFM)
+flow_rate_CFM = linspace(0, 1300, 100);
+
+% Range for the bottom plot (blower door test: Q at 50 Pa)
+leakage_rate_range = linspace(0, 4000, 100);  % [CFM]
+
+% Initialize slider default values (for the top plot)
+C_value = 78.6;               % Home envelope loss coefficient [CFM @ 50 Pa]
+filter_pressure_drop = 1.2136; % Filter loss slope (Pa per CFM)
+L = 130;                      % Duct length in feet
+
+% Checkbox default states
+use_duct_loss = true;
+use_homes_loss = true;   % (for envelope loss in HVAC analysis)
+use_filter_loss = true;
+use_natural_removal = true;  % New toggle for Natural Removal Effects in PM simulation
+
+% Fixed fan performance data (PrioAir EC 10 Fan example):
+fixed_flow_rate_CFM = [1237, 1156, 1079, 997, 900, 769, 118, 0];
+fixed_pressure_Pa   = [0,    49.8,  99.5, 149, 199, 248.8, 374, 399];
+
+%% Create Plot Figure for HVAC Analysis with Toolbar Enabled
+plotFig = figure('Name', 'HVAC Analysis: Pressure Loss vs Flow', 'NumberTitle', 'off', ...
+                 'Position', [100 150 800 700], 'Toolbar', 'figure');
+
+% Top Plot: Total Pressure Loss vs Flow Rate
+ax_total = axes('Parent', plotFig, 'Position', [0.13, 0.55, 0.775, 0.35]);
+hold(ax_total, 'on'); grid(ax_total, 'on');
+xlabel(ax_total, 'Flow Rate (Q) [CFM]');
+ylabel(ax_total, 'Pressure (P) [Pa]');
+title(ax_total, 'Total Pressure Loss vs Flow Rate');
+xlim(ax_total, [0 1300]); ylim(ax_total, [0 400]);
+total_plot = plot(ax_total, flow_rate_CFM, zeros(size(flow_rate_CFM)), 'b-', 'LineWidth', 2, 'DisplayName', 'Total Pressure Loss');
+fixed_line_plot = plot(ax_total, fixed_flow_rate_CFM, fixed_pressure_Pa, 'r--', 'LineWidth', 2, 'DisplayName', 'PrioAir EC 10 Fan');
+legend(ax_total, 'show');
+
+% Bottom Plot: Achievable Pressure vs Home Leakage Rate
+ax_leakage = axes('Parent', plotFig, 'Position', [0.13, 0.05, 0.775, 0.35]);
+hold(ax_leakage, 'on'); grid(ax_leakage, 'on');
+xlabel(ax_leakage, 'Home Leakage Rate (Q @ 50 Pa) [CFM]');
+ylabel(ax_leakage, 'Achievable Pressure (P) [Pa]');
+title(ax_leakage, 'Achievable Pressure vs Home Leakage Rate');
+xlim(ax_leakage, [0, 4000]); ylim(ax_leakage, [0, 420]);
+leakage_plot = plot(ax_leakage, leakage_rate_range, zeros(size(leakage_rate_range)), 'm-', 'LineWidth', 2, 'DisplayName', 'Achievable Pressure');
+legend(ax_leakage, 'show');
+
+%% Create Control Panel Figure (GUI Controls)
+controlFig = figure('Name', 'Control Panel', 'NumberTitle', 'off', ...
+                    'Position', [950 100 500 400], 'Toolbar', 'none');
+controlPanel = uipanel('Parent', controlFig, 'Units', 'pixels', 'Position', [0 0 500 400]);
+
+% --- Home Envelope Coefficient (C) Slider ---
+% Title for slider (centered)
+uicontrol('Parent', controlPanel, 'Style', 'text', ...
+          'Position', [150, 360, 200, 20], ...
+          'String', 'Home Envelope Coefficient (C)', ...
+          'HorizontalAlignment', 'center');
+% Bookend labels: Left and Right for min and max values
+uicontrol('Parent', controlPanel, 'Style', 'text', ...
+          'Position', [20, 340, 100, 20], ...
+          'String', 'Low (~250 CFM)', 'HorizontalAlignment', 'left');
+uicontrol('Parent', controlPanel, 'Style', 'text', ...
+          'Position', [400, 340, 80, 20], ...
+          'String', 'High (~4000 CFM)', 'HorizontalAlignment', 'right');
+% The slider itself
+slider_C = uicontrol('Parent', controlPanel, 'Style', 'slider', 'Min', 39, 'Max', 315, 'Value', C_value, ...
+                     'Position', [50, 310, 400, 20], 'Callback', @(src,event) updateTopPlot());
+
+% --- Filter Pressure Drop Slider ---
+uicontrol('Parent', controlPanel, 'Style', 'text', ...
+          'Position', [150, 280, 200, 20], ...
+          'String', 'Filter Pressure Drop (Pa/CFM)', 'HorizontalAlignment', 'center');
+% Bookend labels for filter slider
+uicontrol('Parent', controlPanel, 'Style', 'text', ...
+          'Position', [20, 260, 100, 20], ...
+          'String', 'MERV 13', 'HorizontalAlignment', 'left');
+uicontrol('Parent', controlPanel, 'Style', 'text', ...
+          'Position', [400, 260, 80, 20], ...
+          'String', 'HEPA 10', 'HorizontalAlignment', 'right');
+slider_filter = uicontrol('Parent', controlPanel, 'Style', 'slider', 'Min', 0.5287, 'Max', 1.2136, 'Value', filter_pressure_drop, ...
+                          'Position', [50, 230, 400, 20], 'Callback', @(src,event) updateBoth());
+
+% --- Duct Length Slider ---
+uicontrol('Parent', controlPanel, 'Style', 'text', ...
+          'Position', [150, 200, 200, 20], ...
+          'String', 'Duct Length (ft)', 'HorizontalAlignment', 'center');
+% Bookend labels for duct length
+uicontrol('Parent', controlPanel, 'Style', 'text', ...
+          'Position', [20, 180, 100, 20], ...
+          'String', '30', 'HorizontalAlignment', 'left');
+uicontrol('Parent', controlPanel, 'Style', 'text', ...
+          'Position', [400, 180, 80, 20], ...
+          'String', '600', 'HorizontalAlignment', 'right');
+slider_length = uicontrol('Parent', controlPanel, 'Style', 'slider', 'Min', 30, 'Max', 600, 'Value', L, ...
+                          'Position', [50, 150, 400, 20], 'Callback', @(src,event) updateBoth());
+
+% --- Display Current Values for the Sliders ---
+label_C = uicontrol('Parent', controlPanel, 'Style', 'text', ...
+                      'Position', [50, 120, 150, 20], ...
+                      'String', ['C: ' num2str(C_value)], 'HorizontalAlignment', 'left');
+label_filter = uicontrol('Parent', controlPanel, 'Style', 'text', ...
+                         'Position', [200, 120, 150, 20], ...
+                         'String', ['Filter: ' num2str(filter_pressure_drop, '%.4f')], 'HorizontalAlignment', 'center');
+label_length = uicontrol('Parent', controlPanel, 'Style', 'text', ...
+                         'Position', [370, 120, 100, 20], ...
+                         'String', ['Length: ' num2str(L) ' ft'], 'HorizontalAlignment', 'right');
+
+% --- Operating Point Display (from HVAC Analysis) ---
+x_intercept_display = uicontrol('Parent', controlPanel, 'Style', 'text', ...
+                                'Position', [50, 90, 200, 20], ...
+                                'String', 'Flow Rate (Q): 0 CFM', 'FontSize', 10);
+y_value_display = uicontrol('Parent', controlPanel, 'Style', 'text', ...
+                            'Position', [260, 90, 220, 20], ...
+                            'String', 'Achievable Pressure: 0 Pa', 'FontSize', 10);
+
+% --- Checkboxes for Loss Components ---
+uicontrol('Parent', controlPanel, 'Style', 'checkbox', ...
+          'Position', [50, 60, 150, 20], 'String', 'Use Duct Pressure Loss', ...
+          'Value', use_duct_loss, 'Callback', @(src,event) toggleDuctLoss(src));
+uicontrol('Parent', controlPanel, 'Style', 'checkbox', ...
+          'Position', [210, 60, 150, 20], 'String', 'Use Homes Pressure Loss', ...
+          'Value', use_homes_loss, 'Callback', @(src,event) toggleHomesLoss(src));
+uicontrol('Parent', controlPanel, 'Style', 'checkbox', ...
+          'Position', [370, 60, 150, 20], 'String', 'Use Filter Pressure Drop', ...
+          'Value', use_filter_loss, 'Callback', @(src,event) toggleFilterLoss(src));
+
+% --- New Checkbox for Natural Removal Effects ---
+uicontrol('Parent', controlPanel, 'Style', 'checkbox', ...
+          'Position', [50, 30, 220, 20], 'String', 'Enable Natural Removal Effects', ...
+          'Value', use_natural_removal, 'Callback', @(src,event) toggleNaturalRemoval(src));
+
+% --- Button to Run Indoor PM Simulation ---
+btn_PM = uicontrol('Parent', controlPanel, 'Style', 'pushbutton', ...
+                   'String', 'Run Indoor PM Simulation', 'Position', [180, 0, 140, 25], ...
+                   'Callback', @(src,event) runPMSimulation());
+
+
+%% Callback Functions for GUI Controls
+
+    function updateTopPlot()
+        % Retrieve current slider values
+        C_value = get(slider_C, 'Value');
+        filter_pressure_drop = get(slider_filter, 'Value');
+        L = get(slider_length, 'Value');
+        set(label_C, 'String', ['C: ' num2str(round(C_value))]);
+        set(label_filter, 'String', ['Filter: ' num2str(filter_pressure_drop, '%.4f') ' slope']);
+        set(label_length, 'String', ['Length: ' num2str(round(L)) ' ft']);
+        
+        % Compute total pressure drop on top plot
+        total_pressure_drop_Pa = zeros(size(flow_rate_CFM));
+        if use_duct_loss
+            duct_loss = 0.2717287 * (flow_rate_CFM.^1.9) / (D_h_inches^5.02) * L;
+            total_pressure_drop_Pa = total_pressure_drop_Pa + duct_loss;
+        end
+        if use_homes_loss
+            homes_loss = (flow_rate_CFM / C_value).^(1/n);
+            total_pressure_drop_Pa = total_pressure_drop_Pa + homes_loss;
+        end
+        if use_filter_loss
+            filter_loss = filter_pressure_drop * flow_rate_CFM;
+            total_pressure_drop_Pa = total_pressure_drop_Pa + filter_loss;
+        end
+        
+        set(total_plot, 'YData', total_pressure_drop_Pa);
+        drawnow;
+        % Update operating point information
+        findIntersectionAndUpdateText(total_plot, fixed_line_plot, C_value);
+    end
+
+    function updateBoth()
+        updateTopPlot();
+        updateBottomPlot();
+    end
+
+    function findIntersectionAndUpdateText(total_plot, fixed_line_plot, C_value)
+        total_pressure_y = get(total_plot, 'YData');
+        total_flow_rate_x = get(total_plot, 'XData');
+        fixed_pressure_y = get(fixed_line_plot, 'YData');
+        fixed_flow_rate_x = get(fixed_line_plot, 'XData');
+        
+        % Interpolate fixed fan curve onto computed domain
+        interpolated_fixed_pressure = interp1(fixed_flow_rate_x, fixed_pressure_y, total_flow_rate_x, 'linear', 'extrap');
+        [~, idx] = min(abs(total_pressure_y - interpolated_fixed_pressure));
+        operating_flow = total_flow_rate_x(idx);
+        operating_pressure = total_pressure_y(idx);
+        
+        set(x_intercept_display, 'String', ['Flow Rate (Q): ' num2str(operating_flow, '%.2f') ' CFM']);
+        set(y_value_display, 'String', ['Achievable Pressure: ' num2str(operating_pressure, '%.2f') ' Pa']);
+        
+        if use_duct_loss
+            duct_loss_op = 0.2717287 * (operating_flow^1.9) / (D_h_inches^5.02) * L;
+        else
+            duct_loss_op = 0;
+        end
+        if use_filter_loss
+            filter_loss_op = filter_pressure_drop * operating_flow;
+        else
+            filter_loss_op = 0;
+        end
+        systemLoss = duct_loss_op + filter_loss_op;
+        
+        % Store operating parameters for later use
+        setappdata(plotFig, 'systemLoss', systemLoss);
+        setappdata(plotFig, 'p_initial', operating_pressure);
+        setappdata(plotFig, 'Q_operating', operating_flow);
+        % Scale baseline_PM vector (original: [20, 25, 30, 35, 40, 45])
+        setappdata(plotFig, 'baseline_PM', [20, 25, 30, 35, 40, 45] * (operating_flow/45));
+    end
+
+    function updateBottomPlot()
+        systemLoss = getappdata(plotFig, 'systemLoss');
+        p0 = getappdata(plotFig, 'p_initial');
+        
+        % effectiveFanFlow is defined from the fixed fan curve,
+        % shifted by systemLoss.
+        effectiveFanFlow = @(p) interp1(fixed_pressure_Pa, fixed_flow_rate_CFM, p + systemLoss, 'linear', 'extrap');
+        
+        achievablePressure = zeros(size(leakage_rate_range));
+        last_valid = NaN;
+        % Get the current slider value for "C"
+        C_slider = get(slider_C, 'Value');  % Current envelope coefficient from slider
+        
+        for i = 1:length(leakage_rate_range)
+            Q_meas = leakage_rate_range(i);
+            % Instead of computing C_home solely from Q_meas, we scale it by the slider value.
+            if Q_meas > 0
+                % The default slider value is 78.6; if at default, effective coefficient is Q_meas/(50^n)
+                C_effective = (C_slider / 78.6) * (Q_meas / (50^n));
+            else
+                C_effective = 1e-6;
+            end
+            % Solve for pressure p satisfying:
+            % effectiveFanFlow(p) = C_effective * p^n.
+            F = @(p) effectiveFanFlow(p) - (C_effective * p^n);
+            
+            p_lower = 0;
+            p_upper = max([p0, 1]);
+            max_iter = 20;
+            iter = 0;
+            while iter < max_iter && F(p_upper) > 0
+                p_upper = p_upper * 2;
+                iter = iter + 1;
+            end
+            
+            if F(p_lower) * F(p_upper) < 0
+                try
+                    p_solution = fzero(F, [p_lower, p_upper]);
+                    if p_solution < 0, p_solution = 0; end
+                    last_valid = p_solution;
+                catch
+                    if ~isnan(last_valid)
+                        p_solution = last_valid;
+                    else
+                        p_solution = 0;
+                    end
+                end
+            else
+                if ~isnan(last_valid)
+                    p_solution = last_valid;
+                else
+                    p_solution = 0;
+                end
+            end
+            achievablePressure(i) = p_solution;
+        end
+        set(leakage_plot, 'YData', achievablePressure);
+        drawnow;
+    end
+
+
+    function toggleDuctLoss(src)
+        use_duct_loss = get(src, 'Value');
+        updateBoth();
+    end
+
+    function toggleHomesLoss(src)
+        use_homes_loss = get(src, 'Value');
+        updateBoth();
+    end
+
+    function toggleFilterLoss(src)
+        use_filter_loss = get(src, 'Value');
+        updateBoth();
+    end
+
+    function toggleNaturalRemoval(src)
+        use_natural_removal = get(src, 'Value');
+        updateBoth();
+    end
+
+% Initial update so that plots are displayed
+updateBoth();
+
+%% =========================
+%% Part B: Indoor PM Simulation
+%% =========================
+% This portion uses the fan operating flow (from Part A) and simulates a 24-hour PM mass-balance:
+%   dC/dt = (Q_in/V)*(C_out - C_in) - (k_removal)*C_in.
+% The gravitational removal term is now explicitly computed using the ceiling height.
+%
+% TEMPORARY: For temperature and humidity, simulated profiles are used.
+% In future, you can read external data from files (e.g., NASA/Purple Air) as shown below.
+%
+% % Example to read external files:
+% % temp_table = readtable('temperature_data.csv'); % Columns: Time, Temperature (K)
+% % humidity_table = readtable('humidity_data.csv');  % Columns: Time, Humidity (fraction)
+% % aqi_table = readtable('aqi_data.csv');            % Columns: Time, AQI or PM values
+
+    function runPMSimulation()
+        %% Simulation Setup
+        t_final = 24;                % Total time (hours)
+        dt = 1/60;                   % Time step (hours)
+        time_vec = 0:dt:t_final;     % Time vector (hours)
+        dt_s = dt * 3600;            % Time step in seconds
+        
+        % Retrieve operating flow from Part A (in CFM)
+        Q_operating = getappdata(plotFig, 'Q_operating');
+        if isempty(Q_operating)
+            Q_operating = 0;
+        end
+        % Convert Q_operating from CFM to m^3/s (1 CFM = 0.00047194745 m^3/s)
+        Q_operating_m3s = Q_operating * 0.00047194745;
+        
+        % Indoor volume (using specified floor area and ceiling height)
+        floor_area = 232.2576;      % m^2 (2500 ft^2)
+        ceiling_height = 2.4384;    % m
+        V_m3 = floor_area * ceiling_height;  % ≈566.33 m^3
+        
+        % Air exchange rate (s^-1)
+        air_exchange_rate = Q_operating_m3s / V_m3;
+        
+        % Particle sizes (microns)
+        particle_sizes = [0.3, 0.5, 1, 2.5, 5, 10];
+        numSizes = length(particle_sizes);
+        numSteps = length(time_vec);
+        
+        %% Simulated Temperature and Humidity Profiles
+        % Temperature (K): fluctuates between ~293 K and ~303 K over 24 hours.
+        temp_sim = 298 + 5 * sin(2*pi*(time_vec - 6)/24);
+        % Relative Humidity (fraction): fluctuates between ~0.60 and ~0.80.
+        humidity_sim = 0.70 + 0.10 * sin(2*pi*(time_vec - 12)/24);
+        
+        %% Outdoor PM Simulation (Time-Varying Profile)
+        % Retrieve baseline_PM vector from Part A (scaled via operating flow)
+        if isempty(getappdata(plotFig, 'baseline_PM'))
+            baseline_PM = [20, 25, 30, 35, 40, 45];
+        else
+            baseline_PM = getappdata(plotFig, 'baseline_PM');
+        end
+        
+        % Define parameters for the smooth diurnal profile:
+        amp_morning = 40;         % Amplitude for morning peak (μg/m³)
+        amp_evening = 50;         % Amplitude for evening peak (μg/m³)
+        peak_morning = 8;         % Hour of the morning peak
+        peak_evening = 18;        % Hour of the evening peak
+        sigma_morning = 2;        % Increased sigma for smoother morning peak
+        sigma_evening = 2;        % Increased sigma for smoother evening peak
+        
+        C_out = zeros(numSteps, numSizes);
+        for t = 1:numSteps
+            hr = time_vec(t);
+            % Compute a smooth traffic-induced diurnal profile using Gaussian functions:
+            traffic_effect = amp_morning * exp(-((hr - peak_morning)^2)/(2*sigma_morning^2)) + ...
+                             amp_evening * exp(-((hr - peak_evening)^2)/(2*sigma_evening^2));
+                             
+            % For a wildfire effect during midday (12:00 to 20:00), use a lower amplitude spike:
+            if hr >= 12 && hr <= 20
+                wildfire_effect = [30, 35, 40, 45, 50, 55];
+            else
+                wildfire_effect = zeros(1, numSizes);
+            end
+            % Use a reduced noise amplitude to maintain smoothness:
+            noise = baseline_PM * 0.01 .* randn(1, numSizes);
+            
+            % Total outdoor PM concentration is the sum of baseline, traffic-induced peaks,
+            % wildfire effects, and a small random perturbation.
+            C_out(t, :) = max(baseline_PM + traffic_effect + wildfire_effect + noise, 0);
+        end
+
+        
+        %% Indoor PM Concentration Simulation (Mass-Balance)
+        C_indoor = zeros(numSteps, numSizes);
+        
+        % Constants for gravitational settling via Stokes' law:
+        kappa = 0.3;           % Hygroscopic parameter
+        rho_particle = 1500;   % kg/m^3
+        rho_air = 1.2;         % kg/m^3
+        g = 9.81;              % m/s^2
+        mu = 1.81e-5;          % Pa·s
+        
+        % Base values for surface deposition and coagulation (dry conditions)
+        k_surface = [2e-6, 3e-6, 4e-6, 6e-6, 8e-6, 1e-5];
+        k_coag = [1e-6, 1e-6, 2e-6, 2e-6, 2e-6, 3e-6];
+        T_ref = 298;  % Reference temperature (K)
+        
+        for t = 1:numSteps-1
+            % Get current temperature and humidity
+            T_current = temp_sim(t);
+            RH_current = humidity_sim(t);
+            
+            % Compute hygroscopic growth factor (GF)
+            GF = (1 + kappa * (RH_current/(1-RH_current)))^(1/3);
+            
+            % Compute gravitational removal rate using ceiling height:
+            particle_diameters_m = particle_sizes * 1e-6;
+            v_settling = ((rho_particle - rho_air) .* g .* (particle_diameters_m.^2)) / (18 * mu);
+            k_gravity_t = v_settling / ceiling_height;  % [s^-1]
+            
+            % Adjust rates for humidity and temperature
+            k_gravity_corr_t = k_gravity_t * GF^2;
+            k_surface_corr_t = k_surface * GF^2;
+            k_coag_corr_t = k_coag * sqrt(T_current/T_ref);
+            
+            % Toggle natural removal effects via new checkbox
+            if use_natural_removal
+                k_natural_loss_t = k_gravity_corr_t + k_surface_corr_t + k_coag_corr_t;
+            else
+                k_natural_loss_t = zeros(1, numSizes);
+            end
+            
+            for i = 1:numSizes
+                dCdt = air_exchange_rate * (C_out(t, i) - C_indoor(t, i)) - k_natural_loss_t(i) * C_indoor(t, i);
+                C_indoor(t+1, i) = C_indoor(t, i) + dt_s * dCdt;
+            end
+        end
+        
+        %% Plot PM Concentrations (Indoor vs. Outdoor)
+        figure('Name', 'Indoor PM Simulation', 'NumberTitle', 'off');
+        for i = 1:numSizes
+            subplot(numSizes,1,i);
+            plot(time_vec, C_indoor(:, i), 'b-', 'LineWidth', 2); hold on;
+            plot(time_vec, C_out(:, i), 'r--', 'LineWidth', 2);
+            xlabel('Time (hours)');
+            ylabel(sprintf('PM %g μm (μg/m^3)', particle_sizes(i)));
+            if i == 1
+                title('Indoor (Blue) vs. Outdoor (Red) PM Concentrations');
+            end
+            grid on;
+        end
+        fprintf('Indoor PM Simulation Complete.\n');
+        
+        %% NEW: Plot Incoming and Outgoing Air Flow & PM Mass Flux
+        incoming_PM_flux = zeros(numSteps,1);
+        outgoing_PM_flux = zeros(numSteps,1);
+        for t = 1:numSteps
+            avg_out_PM = mean(C_out(t, :));
+            avg_in_PM  = mean(C_indoor(t, :));
+            incoming_PM_flux(t) = Q_operating_m3s * avg_out_PM;  % [μg/s]
+            outgoing_PM_flux(t) = Q_operating_m3s * avg_in_PM;     % [μg/s]
+        end
+        
+        figure('Name', 'Air Flow & PM Mass Flux', 'NumberTitle', 'off');
+        yyaxis left;
+        plot(time_vec, incoming_PM_flux, 'b-', 'LineWidth', 2); hold on;
+        plot(time_vec, outgoing_PM_flux, 'r--', 'LineWidth', 2);
+        ylabel('PM Mass Flux (μg/s)');
+        yyaxis right;
+        forcedAirFlow_CFM = Q_operating;
+        plot(time_vec, repmat(forcedAirFlow_CFM, size(time_vec)), 'k-', 'LineWidth', 2);
+        ylabel('Air Flow (CFM)');
+        xlabel('Time (hours)');
+        title('Incoming vs. Outgoing PM Mass Flux and Forced Air Flow');
+        legend('Incoming PM Flux','Outgoing PM Flux','Forced Air Flow (CFM)','Location','best');
+        
+        %% NEW: Consolidated “All Simulation Results” Figure
+        % Create a single window to display all plots using a tiled layout.
+        allPlotsFig = figure('Name', 'All Simulation Results', 'NumberTitle', 'off');
+        tLayout = tiledlayout(allPlotsFig, 3, 3, 'TileSpacing','Compact', 'Padding', 'Compact');
+        
+        % --- Tile 1: HVAC Top Plot (Total Pressure Loss vs. Flow Rate) ---
+        % Retrieve current slider values
+        C_val = get(slider_C, 'Value');
+        filter_val = get(slider_filter, 'Value');
+        L_val = get(slider_length, 'Value');
+        if use_duct_loss
+            duct_loss_all = 0.2717287 * (flow_rate_CFM.^1.9) / (D_h_inches^5.02) * L_val;
+        else
+            duct_loss_all = zeros(size(flow_rate_CFM));
+        end
+        if use_homes_loss
+            homes_loss_all = (flow_rate_CFM / C_val).^(1/n);
+        else
+            homes_loss_all = zeros(size(flow_rate_CFM));
+        end
+        if use_filter_loss
+            filter_loss_all = filter_val * flow_rate_CFM;
+        else
+            filter_loss_all = zeros(size(flow_rate_CFM));
+        end
+        total_pressure_drop_all = duct_loss_all + homes_loss_all + filter_loss_all;
+        
+        nexttile(1);
+        plot(flow_rate_CFM, total_pressure_drop_all, 'b-', 'LineWidth', 2);
+        xlabel('Flow Rate (CFM)'); ylabel('Pressure (Pa)');
+        title('HVAC Top Plot: Total Pressure Loss');
+        
+        % --- Tile 2: HVAC Bottom Plot (Achievable Pressure vs. Home Leakage Rate) ---
+        systemLoss_all = getappdata(plotFig, 'systemLoss');
+        p_initial_all = getappdata(plotFig, 'p_initial');
+        achievablePressure_all = zeros(size(leakage_rate_range));
+        for i = 1:length(leakage_rate_range)
+            Q_meas = leakage_rate_range(i);
+            if Q_meas > 0
+                C_home = Q_meas / (50^n);
+            else
+                C_home = 1e-6;
+            end
+            effectiveFanFlow_all = @(p) interp1(fixed_pressure_Pa, fixed_flow_rate_CFM, p + systemLoss_all, 'linear', 'extrap');
+            F = @(p) effectiveFanFlow_all(p) - (C_home * p^n);
+            p_lower = 0;
+            p_upper = max([p_initial_all, 1]);
+            try
+                achievablePressure_all(i) = fzero(F, [p_lower, p_upper]);
+            catch
+                achievablePressure_all(i) = NaN;
+            end
+        end
+        nexttile(2);
+        plot(leakage_rate_range, achievablePressure_all, 'm-', 'LineWidth', 2);
+        xlabel('Home Leakage Rate (CFM)'); ylabel('Pressure (Pa)');
+        title('HVAC Bottom Plot: Achievable Pressure');
+        
+        % --- Tile 3: Air Flow & PM Mass Flux Plot ---
+        nexttile(3);
+        yyaxis left;
+        plot(time_vec, incoming_PM_flux, 'b-', 'LineWidth', 2); hold on;
+        plot(time_vec, outgoing_PM_flux, 'r--', 'LineWidth', 2);
+        ylabel('PM Mass Flux (μg/s)');
+        yyaxis right;
+        plot(time_vec, repmat(Q_operating, size(time_vec)), 'k-', 'LineWidth', 2);
+        ylabel('Air Flow (CFM)');
+        xlabel('Time (hours)');
+        title('Air Flow & PM Mass Flux');
+        legend('Incoming PM Flux','Outgoing PM Flux','Forced Air Flow (CFM)','Location','best');
+        
+        % --- Tiles 4-9: Indoor vs. Outdoor PM Concentration for Each Particle Size ---
+        for i = 1:numSizes
+            nexttile(3+i);
+            plot(time_vec, C_indoor(:, i), 'b-', 'LineWidth', 2); hold on;
+            plot(time_vec, C_out(:, i), 'r--', 'LineWidth', 2);
+            xlabel('Time (hours)');
+            ylabel(sprintf('PM %g μm', particle_sizes(i)));
+            title(sprintf('PM %g μm', particle_sizes(i)));
+            grid on;
+        end
+        
+        % Instead of linking axes via allPlotsFig.Children, find all axes in the figure.
+        axHandles = findall(allPlotsFig, 'Type', 'axes');
+        if ~isempty(axHandles)
+            linkaxes(axHandles, 'x');
+        end
+
+    end
+
+%% End of Integrated_DigitalTwin_Simulation
+end
