@@ -1,0 +1,549 @@
+function digital_twin_master_script_home_PM_simulation()
+% INTEGRATED_COMBINED_DIGITALTWIN_SIMULATION
+%
+% This script merges two digital twin simulation models into one merged run:
+%
+% 1. The forced–air system simulation calculates the house pressure via a PID controller.
+%    It uses a fan curve (scaled by a control variable “wiper”) to determine a commanded
+%    air flow. The PID adjusts the wiper so that the fan flow (minus losses such as
+%    exhaust, leakage, stack effect, and natural draft) brings the house pressure to a
+%    user–specified target. The home envelope coefficient (C) is computed internally.
+%
+% 2. That resulting fan flow (and thus, air exchange rate) is used in a 24–hour indoor
+%    particulate matter (PM) simulation (mass–balance model). A HEPA filter model tracks
+%    dust accumulation, filter pressure drop, and cost.
+%
+% All outputs are presented in a consolidated tiled layout.
+%
+% Written by: [Your Name]
+% Date: [Today's Date]
+
+%% Clear Workspace, Command Window, and Close All Figures
+clear; clc; close all;
+
+%% GLOBAL PARAMETERS (to be updated via the GUI)
+guiParams.blowerDoor      = 1150;      % [CFM @ 50 Pa] (blower door test)
+guiParams.targetPressure  = 1;         % [Pa] (max about 8 Pa)
+guiParams.filterSlope     = 1.2136;    % [Pa/CFM] (filter drop)
+guiParams.ductLength      = 130;       % [ft]
+guiParams.useDuctLoss     = true;
+guiParams.useHomesLoss    = true;
+guiParams.useFilterLoss   = true;
+guiParams.useNaturalRemoval = true;    % For indoor PM removal processes
+guiParams.enableExhaustFan = true;
+guiParams.enableStackEffect = true;
+
+%% Create the Options GUI
+guiFig = figure('Name','Digital Twin Simulation Options','NumberTitle','off',...
+    'Position',[100 100 500 400],'Resize','off');
+set(guiFig, 'CloseRequestFcn', @customCloseRequestFcn);
+
+% Title
+uicontrol('Parent', guiFig, 'Style','text','String','Set Home/HVAC Parameters',...
+    'Units','normalized','Position',[0.1 0.9 0.8 0.07],'FontSize',12, 'FontWeight','bold');
+
+% Blower Door (CFM @ 50 Pa)
+uicontrol('Parent', guiFig, 'Style','text','String','Blower Door CFM @ 50 Pa:',...
+    'Units','normalized','Position',[0.1 0.8 0.35 0.06],'HorizontalAlignment','left');
+blowerDoorEdit = uicontrol('Parent', guiFig, 'Style','edit','String',num2str(guiParams.blowerDoor),...
+    'Units','normalized','Position',[0.5 0.8 0.35 0.06],'Callback',@updateGUI);
+
+% Target Pressure (Pa)
+uicontrol('Parent', guiFig, 'Style','text','String','Target Pressure (Pa, max ~8):',...
+    'Units','normalized','Position',[0.1 0.7 0.35 0.06],'HorizontalAlignment','left');
+targetPressureEdit = uicontrol('Parent', guiFig, 'Style','edit','String',num2str(guiParams.targetPressure),...
+    'Units','normalized','Position',[0.5 0.7 0.35 0.06],'Callback',@updateGUI);
+
+% Filter Pressure Drop (Pa/CFM)
+uicontrol('Parent', guiFig, 'Style','text','String','Filter Pressure Drop (Pa/CFM):',...
+    'Units','normalized','Position',[0.1 0.62 0.35 0.06],'HorizontalAlignment','left');
+sliderFilter = uicontrol('Parent', guiFig, 'Style','slider','Min',0.5287,'Max',1.2136,...
+    'Value',guiParams.filterSlope, 'Units','normalized','Position',[0.5 0.63 0.35 0.05],'Callback',@updateGUI);
+
+% Duct Length (ft)
+uicontrol('Parent', guiFig, 'Style','text','String','Duct Length (ft):',...
+    'Units','normalized','Position',[0.1 0.54 0.35 0.06],'HorizontalAlignment','left');
+sliderDuct = uicontrol('Parent', guiFig, 'Style','slider','Min',30,'Max',600,...
+    'Value',guiParams.ductLength, 'Units','normalized','Position',[0.5 0.55 0.35 0.05],'Callback',@updateGUI);
+
+% Note: No slider for home envelope coefficient (C) since it is computed internally.
+uicontrol('Parent', guiFig, 'Style','text','String','(Home envelope coefficient computed internally)',...
+    'Units','normalized','Position',[0.1 0.48 0.8 0.05],'HorizontalAlignment','center','FontAngle','italic');
+
+% Checkboxes for Loss Components and Effects
+cbDuct = uicontrol('Parent', guiFig, 'Style','checkbox','String','Use Duct Loss',...
+    'Units','normalized','Position',[0.1 0.38 0.35 0.06],'Value',guiParams.useDuctLoss,'Callback',@updateGUI);
+cbHomes = uicontrol('Parent', guiFig, 'Style','checkbox','String','Use Homes Loss',...
+    'Units','normalized','Position',[0.5 0.38 0.35 0.06],'Value',guiParams.useHomesLoss,'Callback',@updateGUI);
+cbFilter = uicontrol('Parent', guiFig, 'Style','checkbox','String','Use Filter Loss',...
+    'Units','normalized','Position',[0.1 0.30 0.35 0.06],'Value',guiParams.useFilterLoss,'Callback',@updateGUI);
+cbNatural = uicontrol('Parent', guiFig, 'Style','checkbox','String','Enable Natural Removal',...
+    'Units','normalized','Position',[0.5 0.30 0.35 0.06],'Value',guiParams.useNaturalRemoval,'Callback',@updateGUI);
+cbExhaust = uicontrol('Parent', guiFig, 'Style','checkbox','String','Enable Exhaust Fan',...
+    'Units','normalized','Position',[0.1 0.22 0.35 0.06],'Value',guiParams.enableExhaustFan,'Callback',@updateGUI);
+cbStack = uicontrol('Parent', guiFig, 'Style','checkbox','String','Enable Stack Effect',...
+    'Units','normalized','Position',[0.5 0.22 0.35 0.06],'Value',guiParams.enableStackEffect,'Callback',@updateGUI);
+
+% Single RUN Button for merged simulation
+uicontrol('Parent', guiFig, 'Style','pushbutton','String','RUN',...
+    'Units','normalized','Position',[0.3 0.1 0.4 0.1],'FontSize',12,'Callback',@runSimulationCallback);
+
+uiwait(guiFig);
+
+%% Callback to update GUI parameters
+    function updateGUI(~,~)
+        guiParams.blowerDoor     = str2double(get(blowerDoorEdit, 'String'));
+        guiParams.targetPressure = str2double(get(targetPressureEdit, 'String'));
+        guiParams.filterSlope    = get(sliderFilter, 'Value');
+        guiParams.ductLength     = get(sliderDuct, 'Value');
+        guiParams.useDuctLoss    = get(cbDuct, 'Value');
+        guiParams.useHomesLoss   = get(cbHomes, 'Value');
+        guiParams.useFilterLoss  = get(cbFilter, 'Value');
+        guiParams.useNaturalRemoval = get(cbNatural, 'Value');
+        guiParams.enableExhaustFan = get(cbExhaust, 'Value');
+        guiParams.enableStackEffect = get(cbStack, 'Value');
+    end
+
+%% Custom close callback
+    function customCloseRequestFcn(src,~)
+        if isprop(src, 'Toolbar') && ~isempty(get(src,'Toolbar'))
+            try
+                set(src,'Toolbar','none');
+            catch ME
+                fprintf('Error removing toolbar: %s\n',ME.message);
+            end
+        end
+        delete(src);
+    end
+
+%% =========================
+%% Merged Simulation Run (Combined Forced Air + Indoor PM)
+%% =========================
+    function runSimulationCallback(~,~)
+        % Retrieve current GUI settings and close the options GUI.
+        updateGUI();
+        target_pressure = guiParams.targetPressure;
+        if target_pressure > 8, target_pressure = 8; end
+        blowerDoorValue = guiParams.blowerDoor;
+        close(guiFig);
+        
+        %% Pre-Simulation Calculations & Constants
+        % Compute home envelope coefficient (C) internally:
+        n_leak = 0.65;
+        effectiveC = blowerDoorValue / (50^n_leak);
+        
+        % Gravitational acceleration
+        g = 9.81;
+        
+        % Fan Curve Data (PrioAir EC 10)
+        fixed_flow_rate = [1237,1156,1079,997,900,769,118,0];
+        fixed_pres = [0,49.8,99.5,149,199,248.8,374,399];
+        % Fan pressure function scales with control "wiper" from PID.
+        fan_pressure = @(Q, wiper) (wiper/128) * interp1(fixed_flow_rate, fixed_pres, Q, 'linear','extrap');
+        
+        % Loss Models:
+        duct_loss = @(Q) 0.2717287 * (Q.^1.9) / (10^5.02) * guiParams.ductLength;
+        homes_loss = @(Q) (Q / effectiveC).^(1/n_leak);
+        filter_loss = @(Q) guiParams.filterSlope * Q;
+        total_loss = @(Q) duct_loss(Q) + homes_loss(Q) + filter_loss(Q);
+        
+        % PID Controller Parameters:
+        initial_wiper = 0;  wiper = initial_wiper; % fix so the initial wiper value is equal to the wiper value for the pressure ser in the GUI for that home value
+        Kp = 30; Ki = 0.05; Kd = 1;
+        min_wiper = 0; max_wiper = 128;
+        integral_error = 0; previous_error = 0;
+        Q_max = 1237;
+        
+        % Stack Effect Parameters:
+        CFM50_stack = blowerDoorValue;
+        H_ft_stack = 20;  H_m_stack = H_ft_stack * 0.3048;
+        n_stack = 0.65;
+        T_indoor_F = 68; T_indoor_K = (T_indoor_F-32)*5/9+273.15;
+        Patm = 101325; R_air = 287;
+        
+        % Natural Draft Parameters:
+        Q50_m3s = blowerDoorValue * 0.000471947;
+        C_disc = 0.65; deltaP_test = 50;
+        v_test = sqrt((2*deltaP_test)/1.2);
+        A_eff = Q50_m3s / (C_disc*v_test);
+        computed_dh = sqrt((4*A_eff)/pi);
+        % Additional parameters:
+        lambda = 0.019; sum_xi = 1; nd_duct_length = 3.5;
+        duct_diameter = computed_dh;
+        
+        % Energy & HEPA Filter Parameters:
+        max_wattage = 164; on_peak_rate = 0.3047; off_peak_rate = 0.0846;
+        P0 = 250; filter_area = 10.92;
+        dust_capacity_per_m2 = 50; dust_capacity_total = dust_capacity_per_m2 * filter_area;
+        K_dust = P0 / dust_capacity_total;
+        filter_replacement_cost = 100;
+        conc_bin1 = 4000e-6; conc_bin2 = 8000e-6;
+        conc_bin3 = 5000e-6; conc_bin4 = 1000e-6;
+        eff_bin1 = 0.90; eff_bin2 = 0.85; eff_bin3 = 0.95; eff_bin4 = 0.99;
+        
+        % Exhaust Fan Parameter:
+        exhaust_flow = 150;
+        
+        %% Indoor PM Simulation Parameters:
+        floor_area = 232.2576;  % m^2
+        ceiling_height = 2.4384;  % m
+        V_indoor = floor_area * ceiling_height;
+        particle_sizes = [0.3, 0.5, 1, 2.5, 5, 10];  % microns
+        numSizes = length(particle_sizes);
+        
+        %% Simulation Setup
+        total_time = 21600;  % 6 hours [s]
+        dt = 1;              % 1 s time step
+        num_steps = total_time / dt;
+        
+        % Preallocate logging arrays
+        control_time = zeros(1, num_steps);
+        pressure_series = zeros(1, num_steps);
+        wiper_series = zeros(1, num_steps);
+        Qfan_series = zeros(1, num_steps);
+        error_series = zeros(1, num_steps);
+        stack_series = zeros(1, num_steps);
+        exhaust_series = zeros(1, num_steps);
+        power_series = zeros(1, num_steps);
+        cost_series = zeros(1, num_steps);
+        cumulative_cost_energy = zeros(1, num_steps);
+        filter_pressure_series = zeros(1, num_steps);
+        dust_total_series = zeros(1, num_steps);
+        % Preallocate missing arrays:
+        filter_life_series = zeros(1, num_steps);
+        dust_bin1_series = zeros(1, num_steps);
+        dust_bin2_series = zeros(1, num_steps);
+        dust_bin3_series = zeros(1, num_steps);
+        dust_bin4_series = zeros(1, num_steps);
+        % Natural draft logging
+        nd_pressure_series = zeros(1, num_steps);
+        nd_velocity_series = zeros(1, num_steps);
+        nd_flow_series = zeros(1, num_steps);
+        outside_temp_series = zeros(1, num_steps);
+        % Indoor PM concentrations
+        C_indoor_PM = zeros(num_steps, numSizes);
+        baseline_PM = [20, 25, 30, 35, 40, 45];  % constant outdoor PM
+        
+        %% Initialize Simulation States
+        actual_pressure = target_pressure;
+        dust_bin1 = 0; dust_bin2 = 0; dust_bin3 = 0; dust_bin4 = 0;
+        dust_total = 0; filter_pressure = P0;
+        exhaust_state = 0; Q_blower = 0;
+        wiper = initial_wiper;
+        
+        %% MAIN SIMULATION LOOP
+        for cs = 1:num_steps
+            current_time = (cs-1)*dt;
+            control_time(cs) = current_time;
+            
+            %% 1. Exhaust Fan Update
+            if guiParams.enableExhaustFan
+                if (current_time>=1800 && current_time<4500) || (current_time>=8100 && current_time<10800) || (current_time>=14400 && current_time<17100)
+                    desired_exhaust = 1;
+                else
+                    desired_exhaust = 0;
+                end
+                if desired_exhaust == 1
+                    exhaust_state = min(1, exhaust_state + dt/15);
+                else
+                    exhaust_state = max(0, exhaust_state - dt/8);
+                end
+            else
+                exhaust_state = 0;
+            end
+            Q_exhaust = exhaust_state * exhaust_flow;
+            exhaust_series(cs) = Q_exhaust;
+            
+            %% 2. Stack Effect & Outside Temperature
+            if guiParams.enableStackEffect
+                if current_time < 7200
+                    T_outdoor_F = 68;
+                else
+                    T_outdoor_F = 80;
+                end
+            else
+                T_outdoor_F = 68;
+            end
+            outside_temp_series(cs) = T_outdoor_F;
+            T_outdoor_K = (T_outdoor_F - 32)*5/9 + 273.15;
+            rho_outdoor = Patm/(R_air*T_outdoor_K);
+            deltaP_stack = rho_outdoor * g * H_m_stack * ((T_indoor_K/T_outdoor_K)-1);
+            cfm_stack = sign(deltaP_stack) * CFM50_stack * (abs(deltaP_stack)/50)^n_stack;
+            stack_series(cs) = cfm_stack;
+            
+            %% 3. Natural Draft Calculations
+            T_indoor_C = (T_indoor_F-32)*5/9;
+            T_outdoor_C = (T_outdoor_F-32)*5/9;
+            rho_r = 353/(273+T_indoor_C);
+            rho_o = 353/(273+T_outdoor_C);
+            nd_pressure = g*(rho_o - rho_r)*H_m_stack;
+            delta_rho = (rho_o - rho_r);
+            v_mag = sqrt((2*g*abs(delta_rho)*H_m_stack)/((lambda*nd_duct_length*rho_r/duct_diameter)+(sum_xi*rho_r)));
+            if delta_rho < 0
+                nd_velocity = -v_mag;
+            else
+                nd_velocity = v_mag;
+            end
+            nd_flow = (pi*duct_diameter^2/4)*nd_velocity;
+            nd_pressure_series(cs) = nd_pressure;
+            nd_velocity_series(cs) = nd_velocity;
+            nd_flow_series(cs) = nd_flow;
+            
+            %% 4. Blower Fan Command (PID Controlled)
+            f_cmd = @(Q) fan_pressure(Q, wiper) - total_loss(Q);
+            try
+                Q_cmd = fzero(f_cmd, 500);
+            catch
+                Q_cmd = 0;
+            end
+            Q_cmd = max(Q_cmd, 0);
+            if cs == 1
+                Q_blower = Q_cmd;
+            else
+                tau_dyn = 6*(1 - Q_blower/Q_max) + 1;
+                Q_blower = Q_blower + (dt/tau_dyn) * (Q_cmd - Q_blower);
+            end
+            Qfan_series(cs) = Q_blower;
+            
+            %% 5. Backward Euler Pressure Update
+            p_old = actual_pressure;
+            p_new = p_old;
+            tol = 1e-6; max_iter = 10;
+            for iter = 1:max_iter
+                DeltaP_new = p_new; % outside pressure = 0
+                Q_leak = effectiveC * (abs(DeltaP_new)^n_leak);
+                if DeltaP_new >= 0
+                    leak_effect = Q_leak;
+                else
+                    leak_effect = -Q_leak;
+                end
+                net_flow = Q_blower + cfm_stack - Q_exhaust - leak_effect;
+                net_flow_m3s = net_flow * 0.000471947;
+                p_next = p_old + dt * net_flow_m3s;
+                if abs(p_next - p_new) < tol
+                    p_new = p_next;
+                    break;
+                end
+                p_new = p_next;
+            end
+            actual_pressure = p_new;
+            pressure_series(cs) = actual_pressure;
+            
+            %% 6. PID Controller Update for Wiper Adjustment
+            err = target_pressure - actual_pressure;
+            error_series(cs) = err;
+            if cs == 1
+                wiper = initial_wiper;
+                previous_error = err;
+            else
+                if sign(err) ~= sign(previous_error)
+                    integral_error = 0;
+                end
+                integral_error = integral_error + err*dt;
+                integral_error = max(-5, min(5, integral_error));
+                deriv = (err - previous_error)/dt;
+                wiper_adjust = Kp*err + Ki*integral_error + Kd*deriv;
+                wiper = wiper + 0.05*wiper_adjust;
+                wiper = max(min_wiper, min(max_wiper, wiper));
+                previous_error = err;
+            end
+            wiper_series(cs) = wiper;
+            
+            %% 7. Energy & Operating Cost Calculations
+            current_power = (wiper/max_wattage)*max_wattage; % [W]
+            power_series(cs) = current_power;
+            energy_kWh = (current_power/1000)*(dt/3600);
+            current_hour = mod(current_time/3600,6);
+            if current_hour>=2 && current_hour<3.5
+                cost_rate = on_peak_rate;
+            else
+                cost_rate = off_peak_rate;
+            end
+            cost_step = energy_kWh * cost_rate;
+            if cs==1
+                cumulative_cost_energy(cs) = cost_step;
+            else
+                cumulative_cost_energy(cs) = cumulative_cost_energy(cs-1) + cost_step;
+            end
+            cost_series(cs) = cumulative_cost_energy(cs);
+            
+            %% 8. HEPA Filter Simulation (Dust Accumulation & Filter Pressure)
+            Qfan_m3s = Qfan_series(cs) * 0.000471947;
+            flux_bin1 = Qfan_m3s * conc_bin1 * eff_bin1;
+            flux_bin2 = Qfan_m3s * conc_bin2 * eff_bin2;
+            flux_bin3 = Qfan_m3s * conc_bin3 * eff_bin3;
+            flux_bin4 = Qfan_m3s * conc_bin4 * eff_bin4;
+            dust_bin1 = dust_bin1 + flux_bin1 * dt;
+            dust_bin2 = dust_bin2 + flux_bin2 * dt;
+            dust_bin3 = dust_bin3 + flux_bin3 * dt;
+            dust_bin4 = dust_bin4 + flux_bin4 * dt;
+            dust_total = dust_bin1 + dust_bin2 + dust_bin3 + dust_bin4;
+            deltaP_dust = K_dust * dust_total;
+            filter_pressure = P0 + deltaP_dust;
+            current_filter_cost = filter_replacement_cost * (dust_total/dust_capacity_total);
+            filter_life = 100 * (1 - dust_total/dust_capacity_total);
+            if filter_life < 0, filter_life = 0; end
+            filter_pressure_series(cs) = filter_pressure;
+            dust_total_series(cs) = dust_total;
+            % Log dust bin series:
+            dust_bin1_series(cs) = dust_bin1;
+            dust_bin2_series(cs) = dust_bin2;
+            dust_bin3_series(cs) = dust_bin3;
+            dust_bin4_series(cs) = dust_bin4;
+            filter_life_series(cs) = filter_life;
+            
+            %% 9. Indoor PM Simulation Update (Mass-Balance)
+            Q_operating_m3s = Q_blower * 0.000471947;
+            air_exchange_rate = Q_operating_m3s / V_indoor;
+            C_out_PM = baseline_PM;  % constant outdoor PM concentration [µg/m³]
+            temp_current = 298 + 5*sin(2*pi*((current_time/3600)-6)/24);
+            RH_current = 0.70 + 0.10*sin(2*pi*((current_time/3600)-12)/24);
+            GF = (1 + 0.3*(RH_current/(1-RH_current)))^(1/3);
+            diam_m = particle_sizes * 1e-6;
+            v_settling = ((1500-1.2)*g*(diam_m.^2))/(18*1.81e-5);
+            k_gravity = v_settling/ceiling_height;
+            k_gravity_corr = k_gravity * GF^2;
+            k_surface_corr = [2e-6,3e-6,4e-6,6e-6,8e-6,1e-5]*GF^2;
+            k_coag_corr = [1e-6,1e-6,2e-6,2e-6,2e-6,3e-6]*sqrt(temp_current/298);
+            if guiParams.useNaturalRemoval
+                k_total_PM = k_gravity_corr + k_surface_corr + k_coag_corr;
+            else
+                k_total_PM = zeros(1, numSizes);
+            end
+            if cs == 1
+                C_indoor_PM(cs,:) = zeros(1, numSizes);
+            else
+                for i = 1:numSizes
+                    dCdt_PM = air_exchange_rate*(C_out_PM(i) - C_indoor_PM(cs-1,i)) - k_total_PM(i)*C_indoor_PM(cs-1,i);
+                    C_indoor_PM(cs,i) = C_indoor_PM(cs-1,i) + dt*dCdt_PM;
+                end
+            end
+            
+        end % End simulation loop
+        
+        fprintf('Final Blower Fan Flow: %.2f CFM\n', Qfan_series(end));
+        fprintf('Average Blower Fan Flow: %.2f CFM\n', mean(Qfan_series));
+        
+        %% ===============================
+        %% Plot Combined Simulation Results (Tiled Layout)
+        %% ===============================
+        combinedFig = figure('Name','Combined Simulation Results','NumberTitle','off');
+        tl = tiledlayout(combinedFig,8,2, 'TileSpacing','Compact','Padding','Compact');
+        
+        nexttile;
+        plot(control_time/3600, pressure_series, 'b-', 'LineWidth',1.5);
+        hold on; plot(control_time/3600, target_pressure*ones(size(control_time)), 'r--','LineWidth',1.5);
+        xlabel('Time (hours)'); ylabel('House Pressure (Pa)');
+        title(sprintf('House Pressure (Target = %.1f Pa)', target_pressure));
+        grid on;
+        
+        nexttile;
+        plot(control_time/3600, wiper_series, 'm-', 'LineWidth',1.5);
+        xlabel('Time (hours)'); ylabel('Wiper Value');
+        title('Blower Wiper Value vs Time');
+        grid on;
+        
+        nexttile;
+        plot(control_time/3600, Qfan_series, 'r-', 'LineWidth',1.5);
+        xlabel('Time (hours)'); ylabel('Blower Flow (CFM)');
+        title('Blower Fan Flow vs Time');
+        grid on;
+        
+        nexttile;
+        plot(control_time/3600, error_series, 'k-', 'LineWidth',1.5);
+        xlabel('Time (hours)'); ylabel('Pressure Error (Pa)');
+        title('PID Controller Error vs Time');
+        grid on;
+        
+        nexttile;
+        plot(control_time/3600, outside_temp_series, 'b-', 'LineWidth',1.5);
+        xlabel('Time (hours)'); ylabel('Outside Temp (°F)');
+        title('Outside Temperature vs Time');
+        grid on;
+        
+        nexttile;
+        plot(control_time/3600, stack_series, 'g-', 'LineWidth',1.5);
+        xlabel('Time (hours)'); ylabel('Stack Flow (CFM)');
+        title('Stack Effect Flow vs Time');
+        grid on;
+        
+        nexttile;
+        plot(control_time/3600, exhaust_series, 'c-', 'LineWidth',1.5);
+        xlabel('Time (hours)'); ylabel('Exhaust Flow (CFM)');
+        title('Exhaust Fan Activation vs Time');
+        grid on;
+        
+        nexttile;
+        plot(control_time/3600, nd_pressure_series, 'b-', 'LineWidth',1.5);
+        xlabel('Time (hours)'); ylabel('ND Pressure (Pa)');
+        title('Natural Draft Pressure vs Time');
+        grid on;
+        
+        nexttile;
+        plot(control_time/3600, nd_velocity_series, 'r-', 'LineWidth',1.5);
+        xlabel('Time (hours)'); ylabel('ND Velocity (m/s)');
+        title('Natural Draft Velocity vs Time');
+        grid on;
+        
+        nexttile;
+        plot(control_time/3600, nd_flow_series, 'k-', 'LineWidth',1.5);
+        xlabel('Time (hours)'); ylabel('ND Flow (m^3/s)');
+        title('Natural Draft Flow vs Time');
+        grid on;
+        
+        nexttile;
+        plot(control_time/3600, power_series, 'b-', 'LineWidth',1.5);
+        xlabel('Time (hours)'); ylabel('Power (W)');
+        title('Blower Fan Wattage vs Time');
+        grid on;
+        
+        nexttile;
+        plot(control_time/3600, cumulative_cost_energy, 'r-', 'LineWidth',1.5);
+        xlabel('Time (hours)'); ylabel('Cumulative Cost ($)');
+        title('Cumulative Operating Cost');
+        grid on;
+        
+        nexttile;
+        plot(control_time/3600, filter_life_series, 'k-', 'LineWidth',1.5);
+        xlabel('Time (hours)'); ylabel('Filter Life (%)');
+        title('Remaining Filter Life vs Time');
+        grid on;
+        
+        nexttile;
+        plot(control_time/3600, filter_pressure_series, 'r-', 'LineWidth',2);
+        xlabel('Time (hours)'); ylabel('Filter Pressure (Pa)');
+        title('HEPA Filter Pressure Drop');
+        grid on;
+        
+        nexttile;
+        plot(control_time/3600, dust_total_series, 'b-', 'LineWidth',2);
+        xlabel('Time (hours)'); ylabel('Dust Load (g)');
+        title('Total Cumulative Dust Load');
+        grid on;
+        
+        nexttile;
+        plot(control_time/3600, [dust_bin1_series; dust_bin2_series; dust_bin3_series; dust_bin4_series]', 'LineWidth',1.5);
+        xlabel('Time (hours)'); ylabel('Dust Load (g)');
+        title('Dust Load per Particle Size Bin');
+        legend('Bin1','Bin2','Bin3','Bin4','Location','best');
+        grid on;
+        
+        % Indoor PM Concentrations:
+        pmFig = figure('Name','Indoor PM Concentrations','NumberTitle','off');
+        for i = 1:numSizes
+            subplot(numSizes,1,i);
+            plot(control_time/3600, C_indoor_PM(:,i), 'b-', 'LineWidth',1.5);
+            hold on;
+            plot(control_time/3600, baseline_PM(i)*ones(size(control_time)), 'r--', 'LineWidth',1.5);
+            xlabel('Time (hours)'); ylabel(sprintf('PM %g µm (µg/m³)', particle_sizes(i)));
+            if i == 1
+                title('Indoor (Blue) vs Outdoor (Red) PM Concentrations');
+            end
+            grid on;
+        end
+        
+        fprintf('Integrated Simulation Complete.\n');
+    end
+
+%% End of Integrated_Combined_DigitalTwin_Simulation
+end
