@@ -1,0 +1,56 @@
+function compareInterventionEfficacy()
+% COMPARATIVE WRAPPER: Runs simulation with and without the intervention
+
+% === RUN BOTH SIMULATIONS ===
+results_on  = runInterventionSim(true);   % Intervention enabled
+results_off = runInterventionSim(false);  % Intervention disabled
+
+% === Extract data ===
+time_minutes = results_on.control_time / 60;
+PM_on  = results_on.total_PM10;
+PM_off = results_off.total_PM10;
+dt = results_on.dt;
+
+% === Compute difference and metrics ===
+delta_PM     = PM_off - PM_on;
+percent_reduction = 100 * delta_PM ./ PM_off;
+percent_reduction(isnan(percent_reduction)) = 0;
+
+cumulative_exposure_on  = sum(PM_on)  * dt / 60;  % µg·min/m³
+cumulative_exposure_off = sum(PM_off) * dt / 60;
+
+absolute_reduction = cumulative_exposure_off - cumulative_exposure_on;
+percent_exposure_reduction = 100 * (absolute_reduction / cumulative_exposure_off);
+
+% === DISPLAY METRICS ===
+fprintf('\n==== INTERVENTION EFFICACY REPORT ====\n');
+fprintf('Cumulative exposure WITH intervention : %.1f µg·min/m³\n', cumulative_exposure_on);
+fprintf('Cumulative exposure WITHOUT intervention: %.1f µg·min/m³\n', cumulative_exposure_off);
+fprintf('Absolute exposure reduction: %.1f µg·min/m³\n', absolute_reduction);
+fprintf('Percent reduction in exposure: %.1f%%\n', percent_exposure_reduction);
+
+% === PLOT COMPARISON ===
+figure('Name','Intervention vs. No Intervention','Color','w');
+
+subplot(3,1,1);
+plot(time_minutes, PM_on, 'b', 'LineWidth', 1.4); hold on;
+plot(time_minutes, PM_off, 'r--', 'LineWidth', 1.4);
+legend('With Intervention', 'Without Intervention');
+ylabel('Total PM_{10} (µg/m³)');
+title('Indoor PM_{10} Concentration Comparison');
+grid on;
+
+subplot(3,1,2);
+plot(time_minutes, delta_PM, 'k', 'LineWidth', 1.4);
+ylabel('Δ PM_{10} (µg/m³)');
+title('Absolute Reduction');
+grid on;
+
+subplot(3,1,3);
+plot(time_minutes, percent_reduction, 'g', 'LineWidth', 1.4);
+ylabel('Reduction (%)');
+xlabel('Time (minutes)');
+title('Percent Reduction in PM_{10}');
+grid on;
+
+end
