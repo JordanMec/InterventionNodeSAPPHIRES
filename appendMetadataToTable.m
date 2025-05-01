@@ -1,5 +1,7 @@
 function appendMetadataToTable(results, csvFile)
 % =========================================================================
+% updated May 1st 2025
+% 
 % appendMetadataToTable
 %
 % Flattens the `results.metadata` into a row and appends it to a CSV file.
