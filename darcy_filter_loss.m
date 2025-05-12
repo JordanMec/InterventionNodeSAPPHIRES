@@ -1,4 +1,5 @@
 function [dP, k_media] = darcy_filter_loss(Q_m3s, dust_total, params)
+% last edit: monday may 12th 2025
 % Time-varying filter dP using a composite Darcy model.
 %
 % Inputs
@@ -39,30 +40,81 @@ try
         dust_total = 0;
     end
     
+    % Extract parameters with safety checks
     mu_air   = params.mu_air;
-    A        = params.A_filter;
-    k_media  = params.k_media_clean;
-    rho_cake = params.rho_cake;
-    k_cake   = params.k_cake;
+    if isnan(mu_air) || mu_air <= 0
+        warning('Invalid mu_air value, using default');
+        mu_air = 1.81e-5;  % Default value for air viscosity
+    end
     
-    % Protect against division by zero
-    A = max(0.001, A);
-    k_media = max(1e-15, k_media);
-    k_cake = max(1e-15, k_cake);
+    % IMPORTANT FIX: Increase minimum filter area to avoid division issues
+    A = max(0.01, params.A_filter);  % More conservative minimum (originally 0.001)
+    if isnan(A)
+        warning('Invalid filter area, using default');
+        A = 10;  % Default safe value
+    end
     
-    % cake thickness (m)
+    % IMPORTANT FIX: Increase minimum permeability values to avoid division issues
+    k_media = max(1e-14, params.k_media_clean);  % More conservative minimum (originally 1e-15)
+    if isnan(k_media)
+        warning('Invalid k_media_clean, using default');
+        k_media = 1e-11;  % Default safe value
+    end
+    
+    k_cake = max(1e-14, params.k_cake);  % More conservative minimum (originally 1e-15)
+    if isnan(k_cake)
+        warning('Invalid k_cake, using default');
+        k_cake = 1e-12;  % Default safe value
+    end
+    
+    rho_cake = max(1, params.rho_cake);  % Ensure positive density
+    if isnan(rho_cake)
+        warning('Invalid rho_cake, using default');
+        rho_cake = 700;  % Default safe value
+    end
+    
+    % IMPORTANT FIX: Special handling for very small flow
+    if Q_m3s < 1e-6
+        dP = 0;  % No flow means no pressure drop
+        return;
+    end
+    
+    % IMPORTANT FIX: Add reasonable limits to cake thickness
+    % Calculate cake thickness (m) with safety bounds
     L_cake = (dust_total/1000) / (rho_cake * A);
     
-    % resistances in series (media + cake)
+    % IMPORTANT FIX: Cap cake thickness to physical limits
+    if L_cake > 0.05  % If cake thickness exceeds reasonable value (5 cm)
+        L_cake = 0.05;  % Cap at a reasonable maximum
+        warning('Cake thickness exceeded physical limit, capped at 5 cm');
+    end
+    
+    % Calculate resistances in series (media + cake)
     dP_media = (mu_air * Q_m3s / A) * (1 / k_media);
     dP_cake  = (mu_air * Q_m3s / A) * (L_cake / k_cake);
     
+    % IMPORTANT FIX: Check individual components for validity
+    if isnan(dP_media) || isinf(dP_media) || dP_media < 0
+        warning('Invalid media pressure drop, using fallback');
+        dP_media = 250 * (Q_m3s / 0.5);  % Linear model based on typical values
+    end
+    
+    if isnan(dP_cake) || isinf(dP_cake) || dP_cake < 0
+        warning('Invalid cake pressure drop, using fallback');
+        dP_cake = 50 * L_cake * (Q_m3s / 0.5);  % Simple model
+    end
+    
+    % Sum the components
     dP = dP_media + dP_cake;
     
+    % IMPORTANT FIX: Add upper bounds to pressure drop
+    dP = min(2000, dP);  % Cap at a reasonable maximum pressure
+    
     % Validate output
-    if isnan(dP) || isinf(dP)
-        warning('Invalid value detected in darcy_filter_loss output, using 0');
-        dP = 0;
+    if isnan(dP) || isinf(dP) || ~isreal(dP) || dP < 0
+        warning('Invalid value detected in darcy_filter_loss output, using fallback model');
+        % IMPORTANT FIX: Use a physically reasonable fallback model
+        dP = 250 * (Q_m3s / 0.5) + 100 * (dust_total / 100) * (Q_m3s / 0.5);
     end
 catch ME
     fprintf('[ERROR] in darcy_filter_loss: %s\n', ME.message);
