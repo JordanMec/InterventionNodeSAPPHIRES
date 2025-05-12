@@ -1,4 +1,5 @@
 function dP = homes_loss(Q, C_eff, n_leak)
+% Last Edit: Monday may 12th 2025
 % Envelope infiltration/back-pressure (Pa) as a function of Q (CFM).
 try
     % Input validation
@@ -13,25 +14,38 @@ try
         Q = 0;
     end
     
-    C_eff = max(0.001, C_eff);  % Avoid division by zero
+    % IMPORTANT FIX: Increase the minimum allowed C_eff to prevent division issues
+    % The original minimum was 0.001, but this may still cause problems
+    C_eff = max(0.1, C_eff);  % Use a larger minimum value for better numerical stability
     if isnan(C_eff)
         warning('NaN detected in homes_loss C_eff input, using 1');
         C_eff = 1;
     end
     
-    n_leak = max(0.01, min(1, n_leak));  % Keep in reasonable range
+    % IMPORTANT FIX: Ensure n_leak is in a safe range for the power operation
+    n_leak = max(0.1, min(1, n_leak));  % Use a minimum of 0.1 instead of 0.01
     if isnan(n_leak)
         warning('NaN detected in homes_loss n_leak input, using 0.65');
         n_leak = 0.65;
     end
     
-    dP = (Q ./ C_eff).^(1./n_leak);
-    
-    % Validate output
-    if isnan(dP) || isinf(dP)
-        warning('Invalid value detected in homes_loss output, using 0');
-        dP = 0;
+    % IMPORTANT FIX: Special handling for very small flow values
+    if Q < 0.001
+        dP = 0;  % For near-zero flow, pressure drop is zero
+    else
+        % Original calculation with additional safety
+        dP = (Q ./ C_eff).^(1./n_leak);
+        
+        % IMPORTANT FIX: Add explicit check for invalid results after calculation
+        if isnan(dP) || isinf(dP) || ~isreal(dP) || dP < 0
+            warning('Invalid result after homes_loss calculation, applying fallback');
+            dP = Q * 0.1;  % Simple linear fallback model (0.1 Pa per CFM)
+        end
+        
+        % IMPORTANT FIX: Limit to physically reasonable range
+        dP = min(1000, dP);  % Cap at 1000 Pa to prevent extreme values
     end
+    
 catch ME
     fprintf('[ERROR] in homes_loss: %s\n', ME.message);
     dP = 0;  % Default to 0 pressure loss to prevent simulation crash
