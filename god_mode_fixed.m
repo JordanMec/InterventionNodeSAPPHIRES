@@ -1,13 +1,13 @@
 % function god_mode_fixed()
-%% =====================================================================
-%%  Digital Twin HVAC Simulation - Enhanced Version
-%%  This script simulates a year-long HVAC system with PID control,
-%%  filter dynamics, and indoor air quality tracking.
-%% =====================================================================
+% =====================================================================
+%  Digital Twin HVAC Simulation - Enhanced Version
+%  This script simulates a year-long HVAC system with PID control,
+%  filter dynamics, and indoor air quality tracking.
+% =====================================================================
 %   last edit monday may 12th 2025 
-%% =====================================================================
+% =====================================================================
 %% MAIN SCRIPT - EXECUTE SIMULATION AND ANALYSIS
-%% =====================================================================
+% =====================================================================
 
 % Clear workspace and command window for a clean start
 clear; clc;
