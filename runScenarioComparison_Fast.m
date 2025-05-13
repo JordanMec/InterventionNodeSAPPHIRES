@@ -1,42 +1,42 @@
-function runScenarioComparison(scenarioParams)
+function runScenarioComparison_Fast(scenarioParams)
 % =========================================================================
-% runScenarioComparison.m - Run and Compare Simulation Scenarios
+% runScenarioComparison_Fast.m - Run and Compare Simulation Scenarios Fast
 % =========================================================================
 % Description:
-%   This function runs multiple simulation scenarios with different
-%   parameters and compares the results. It's primarily used to compare
-%   standard filters with HEPA filters, but can be used for other
-%   parameter comparisons as well.
+%   This is an optimized version of runScenarioComparison that uses
+%   performance-optimized simulation code for faster execution. It's
+%   especially useful for comparing lengthy simulations with hourly data.
 %
 % Inputs:
 %   scenarioParams - Structure containing scenario definitions:
 %     .scenario1: Structure with parameters for first scenario
 %     .scenario2: Structure with parameters for second scenario
 %     .saveResults: Boolean flag for saving comparison results
+%     .useFastMode: Boolean flag to use fast simulation mode (default: true)
 %
 % Outputs:
 %   None (creates comparison plots and optionally saves results)
 %
-% Related files:
-%   - godMode.m: Can call this function after baseline simulation
-%   - compareScenarios.m: Called to visualize scenario comparisons
-%   - runDigitalTwinComparison.m: Wrapper script that calls this function
-%
-% Notes:
-%   - Typical usage is to compare standard vs. HEPA filters
-%   - Each scenario can have different parameters (e.g., filter type, pressure)
-%   - Results are visualized using compareScenarios.m
-%   - Optional saving of comparison results to MAT-file
+% Performance Improvements:
+%   - Uses multi-rate simulation techniques
+%   - Optimizes computational bottlenecks
+%   - Reduces logging frequency and progress updates
+%   - Maintains accuracy for critical fast dynamics
 %
 % =========================================================================
 % Last updated: May 12, 2025
 % =========================================================================
 
-fprintf('Starting HVAC Digital Twin scenario comparison...\n');
+fprintf('Starting HVAC Digital Twin scenario comparison (FAST MODE)...\n');
 
 % Validate input parameters
 if ~isstruct(scenarioParams) || ~isfield(scenarioParams, 'scenario1') || ~isfield(scenarioParams, 'scenario2')
     error('At least two scenarios must be provided in the scenarioParams struct');
+end
+
+% Default to fast mode unless explicitly set to false
+if ~isfield(scenarioParams, 'useFastMode')
+    scenarioParams.useFastMode = true;
 end
 
 try
@@ -84,10 +84,10 @@ try
     baseParticleParams = initParticleParams();
     
     % -------------------------------------------------------------------------
-    % Run Scenario 1
+    % Run Scenario 1 (Fast mode)
     % -------------------------------------------------------------------------
     fprintf('\n=====================================================================\n');
-    fprintf('Running scenario 1: %s\n', scenarioParams.scenario1.name);
+    fprintf('Running scenario 1: %s (FAST MODE)\n', scenarioParams.scenario1.name);
     fprintf('=====================================================================\n');
     
     % Copy base parameters for scenario 1
@@ -114,18 +114,36 @@ try
         end
     end
     
-    % Run simulation for scenario 1
+    % Run simulation for scenario 1 (use fast version)
     [timeParams1, simArrays1] = setupTimeGrid(env, particleParams1);
-    [simArrays1, simState1] = runSimulation(env, guiParams1, darcyParams1, economicParams1, ...
-                                         houseParams1, particleParams1, timeParams1, simArrays1);
+    
+    % Start timing for performance tracking
+    startTime1 = tic;
+    
+    % Use the fast simulation if enabled
+    if scenarioParams.useFastMode
+        fprintf('Using optimized fast simulation mode...\n');
+        [simArrays1, simState1] = runSimulation_Fast(env, guiParams1, darcyParams1, economicParams1, ...
+                                                 houseParams1, particleParams1, timeParams1, simArrays1);
+    else
+        [simArrays1, simState1] = runSimulation(env, guiParams1, darcyParams1, economicParams1, ...
+                                            houseParams1, particleParams1, timeParams1, simArrays1);
+    end
+    
+    % Report elapsed time
+    elapsed1 = toc(startTime1);
+    fprintf('Simulation completed in %.1f seconds (%.2f ms per simulated hour)\n', ...
+            elapsed1, 1000*elapsed1/timeParams1.num_hours);
+    
+    % Post-process results
     [results1, stats1] = postProcessResults(simArrays1, simState1, guiParams1, darcyParams1);
     results1.scenarioName = scenarioParams.scenario1.name;
     
     % -------------------------------------------------------------------------
-    % Run Scenario 2
+    % Run Scenario 2 (Fast mode)
     % -------------------------------------------------------------------------
     fprintf('\n=====================================================================\n');
-    fprintf('Running scenario 2: %s\n', scenarioParams.scenario2.name);
+    fprintf('Running scenario 2: %s (FAST MODE)\n', scenarioParams.scenario2.name);
     fprintf('=====================================================================\n');
     
     % Copy base parameters for scenario 2
@@ -152,10 +170,28 @@ try
         end
     end
     
-    % Run simulation for scenario 2
+    % Run simulation for scenario 2 (use fast version)
     [timeParams2, simArrays2] = setupTimeGrid(env, particleParams2);
-    [simArrays2, simState2] = runSimulation(env, guiParams2, darcyParams2, economicParams2, ...
-                                         houseParams2, particleParams2, timeParams2, simArrays2);
+    
+    % Start timing for performance tracking
+    startTime2 = tic;
+    
+    % Use the fast simulation if enabled
+    if scenarioParams.useFastMode
+        fprintf('Using optimized fast simulation mode...\n');
+        [simArrays2, simState2] = runSimulation_Fast(env, guiParams2, darcyParams2, economicParams2, ...
+                                                 houseParams2, particleParams2, timeParams2, simArrays2);
+    else
+        [simArrays2, simState2] = runSimulation(env, guiParams2, darcyParams2, economicParams2, ...
+                                            houseParams2, particleParams2, timeParams2, simArrays2);
+    end
+    
+    % Report elapsed time
+    elapsed2 = toc(startTime2);
+    fprintf('Simulation completed in %.1f seconds (%.2f ms per simulated hour)\n', ...
+            elapsed2, 1000*elapsed2/timeParams2.num_hours);
+    
+    % Post-process results
     [results2, stats2] = postProcessResults(simArrays2, simState2, guiParams2, darcyParams2);
     results2.scenarioName = scenarioParams.scenario2.name;
     
@@ -185,14 +221,27 @@ try
         comparison.stats1 = stats1;
         comparison.stats2 = stats2;
         
+        % Add performance metrics
+        comparison.performance = struct();
+        comparison.performance.elapsed1 = elapsed1;
+        comparison.performance.elapsed2 = elapsed2;
+        comparison.performance.ms_per_hour1 = 1000*elapsed1/timeParams1.num_hours;
+        comparison.performance.ms_per_hour2 = 1000*elapsed2/timeParams2.num_hours;
+        comparison.performance.usedFastMode = scenarioParams.useFastMode;
+        
         save(saveFile, 'comparison', '-v7.3');
         fprintf('Results saved to %s\n', saveFile);
     end
     
-    fprintf('Scenario comparison completed.\n');
+    % Report total performance
+    totalElapsed = elapsed1 + elapsed2;
+    totalHours = timeParams1.num_hours + timeParams2.num_hours;
+    fprintf('\nTotal comparison completed in %.1f seconds (%.2f ms per simulated hour)\n', ...
+           totalElapsed, 1000*totalElapsed/totalHours);
+    
 catch ME
     % Handle errors
-    fprintf('\n[ERROR] in runScenarioComparison: %s\n', ME.message);
+    fprintf('\n[ERROR] in runScenarioComparison_Fast: %s\n', ME.message);
     fprintf('Line: %d\n', ME.stack(1).line);
     rethrow(ME);
 end

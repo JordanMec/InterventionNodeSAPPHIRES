@@ -1,108 +1,136 @@
 function results = runInterventionSim(hepaEnabled, envData)
-% RUNINTERVENTIONSIM Run a simplified HVAC intervention simulation
+% =========================================================================
+% runInterventionSim.m - Simplified Intervention Simulation
+% =========================================================================
+% Description:
+%   This function implements a simplified model for evaluating HVAC
+%   interventions, particularly HEPA filtration. It uses a more streamlined
+%   approach than the full Digital Twin simulation for faster evaluation
+%   of basic scenarios.
 %
 % Inputs:
-%   hepaEnabled - Boolean flag for HEPA filtration (true/false)
-%   envData     - Table with environment data (TempF, RH, PM10)
+%   hepaEnabled - Boolean flag indicating whether HEPA filtration is enabled
+%   envData     - Table with environmental data
 %
-% Output:
-%   results     - Struct with simulation results and metadata
+% Outputs:
+%   results     - Structure with simulation results:
+%                 - total_PM10: PM10 concentration time series
+%                 - control_time: Time vector (seconds)
+%                 - dt: Time step (seconds)
+%                 - metadata: Additional metrics and simulation details
 %
-% This function runs a simplified version of the Digital Twin model
-% focused specifically on indoor PM10 concentration with/without HEPA.
-% It provides compatible outputs to the runManualComparison.m script.
+% Related files:
+%   - runManualComparison.m: Calls this function for quick comparisons
+%   - runScenarioComparison.m: More comprehensive comparison approach
+%
+% Notes:
+%   - Simplified model focusing primarily on PM10 concentrations
+%   - Uses basic mass balance approach with fewer parameters
+%   - Calculates energy usage and costs for basic economic comparison
+%   - Much faster than full Digital Twin simulation
+%   - Useful for quick evaluations and sensitivity analyses
+%
+% =========================================================================
+% Last updated: May 12, 2025
+% =========================================================================
 
 fprintf('Running intervention simulation (HEPA %s)\n', iif(hepaEnabled, 'ON', 'OFF'));
 
 try
-    % Initialize parameters
-    simPeriod = 8760;  % hours to simulate (1 year)
-    dt = 60;           % seconds per time step
+    % Start timing for runtime calculation
+    tic;
     
-    % Define room parameters
-    V_room = 250;  % m³ room volume
+    % -------------------------------------------------------------------------
+    % Simulation parameters
+    % -------------------------------------------------------------------------
+    simPeriod = 8760;        % Simulation period (hours)
+    dt = 60;                 % Time step (seconds)
+    V_room = 250;            % Room volume (m³)
     
-    % Set flow rates based on HEPA state
+    % Set flow rates and efficiencies based on HEPA setting
     if hepaEnabled
-        Q_base = 300;     % CFM baseline ventilation
-        Q_hepa = 300;     % CFM through HEPA filter
-        hepa_eff = 0.99;  % HEPA filter efficiency for PM10
+        Q_base = 300;        % Base ventilation flow rate (CFM)
+        Q_hepa = 300;        % HEPA flow rate (CFM)
+        hepa_eff = 0.99;     % HEPA efficiency (fraction)
     else
-        Q_base = 300;     % CFM baseline ventilation
-        Q_hepa = 0;       % No HEPA flow
-        hepa_eff = 0;     % No HEPA filtering
+        Q_base = 300;        % Base ventilation flow rate (CFM)
+        Q_hepa = 0;          % No HEPA flow
+        hepa_eff = 0;        % No HEPA efficiency
     end
     
-    % Initialize time and control arrays
-    steps_per_hour = 3600 / dt;
-    total_steps = simPeriod * steps_per_hour;
-    
+    % -------------------------------------------------------------------------
     % Pre-allocate arrays
-    control_time = (0:total_steps-1) * dt;  % seconds
-    total_PM10 = zeros(total_steps, 1);
+    % -------------------------------------------------------------------------
+    steps_per_hour = 3600 / dt;              % Steps per hour
+    total_steps = simPeriod * steps_per_hour; % Total simulation steps
+    control_time = (0:total_steps-1) * dt;   % Time vector (seconds)
+    total_PM10 = zeros(total_steps, 1);      % PM10 concentrations
+    total_PM10(1) = 5;                       % Initial PM10 concentration
     
-    % Initialize PM10 concentration
-    total_PM10(1) = 5;  % μg/m³ initial concentration
+    % Energy tracking
+    energy_hepa_kwh = 0;         % HEPA energy consumption (kWh)
+    energy_ventilation_kwh = 0;  % Ventilation energy consumption (kWh)
     
-    % Energy consumption tracking
-    energy_hepa_kwh = 0;
-    energy_ventilation_kwh = 0;
+    % Unit conversion constants
+    cfm_to_m3s = 0.000471947;    % CFM to m³/s conversion
     
-    % Convert CFM to m³/s
-    cfm_to_m3s = 0.000471947;
+    % Convert flow rates to m³/s
     Q_base_m3s = Q_base * cfm_to_m3s;
     Q_hepa_m3s = Q_hepa * cfm_to_m3s;
     
-    % Base ventilation power (W)
-    P_base = 75;
+    % Power consumption (W)
+    P_base = 75;                 % Base ventilation power
+    P_hepa = 100 * hepaEnabled;  % HEPA power (0 if disabled)
     
-    % Additional power for HEPA (W)
-    P_hepa = 100 * hepaEnabled;
+    % -------------------------------------------------------------------------
+    % Cost parameters
+    % -------------------------------------------------------------------------
+    cost_per_kwh = 0.15;  % Electricity cost ($/kWh)
     
-    % Cost per kWh ($)
-    cost_per_kwh = 0.15;
-    
+    % -------------------------------------------------------------------------
+    % Run simulation
+    % -------------------------------------------------------------------------
     fprintf('Simulating %d hours (%d time steps)...\n', simPeriod, total_steps);
     
-    % Main simulation loop
     for t = 2:total_steps
-        % Get current hour
+        % Get current hour and handle wraparound for repeating environment data
         current_hour = floor((t-1) / steps_per_hour) + 1;
-        
-        % Ensure we don't exceed environment data
         if current_hour > height(envData)
             current_hour = mod(current_hour - 1, height(envData)) + 1;
         end
         
-        % Get outdoor PM10 for current hour
+        % Get outdoor PM10 concentration for current hour
         outdoor_PM10 = envData.PM10(current_hour);
         
-        % Calculate indoor PM physics
-        % 1. Ventilation (bringing in outdoor air)
+        % Calculate concentration changes
+        
+        % Change due to ventilation (outdoor air coming in)
         ventilation_change = Q_base_m3s * (outdoor_PM10 - total_PM10(t-1)) / V_room;
         
-        % 2. HEPA filtration (cleaning indoor air)
+        % Change due to HEPA filtration (if enabled)
         hepa_removal = Q_hepa_m3s * total_PM10(t-1) * hepa_eff / V_room;
         
-        % 3. Natural deposition rate (surfaces, gravity)
+        % Change due to natural deposition
         deposition_rate = 0.2 / 3600;  % 0.2 per hour converted to per second
         natural_removal = deposition_rate * total_PM10(t-1);
         
-        % Total rate of change
+        % Calculate net change in PM10
         dPM10_dt = ventilation_change - hepa_removal - natural_removal;
         
-        % Update PM10 concentration using explicit Euler step
+        % Update PM10 concentration
         total_PM10(t) = total_PM10(t-1) + dPM10_dt * dt;
         
-        % Prevent negative concentrations
+        % Ensure non-negative concentration
         total_PM10(t) = max(0, total_PM10(t));
         
-        % Update energy consumption (W * s -> kWh)
+        % Accumulate energy usage (J to kWh conversion included: /3600000)
         energy_ventilation_kwh = energy_ventilation_kwh + P_base * dt / 3600000;
         energy_hepa_kwh = energy_hepa_kwh + P_hepa * dt / 3600000;
     end
     
-    % Calculate key metrics
+    % -------------------------------------------------------------------------
+    % Calculate summary statistics
+    % -------------------------------------------------------------------------
     PM10_avg = mean(total_PM10);
     PM10_max = max(total_PM10);
     PM10_final = total_PM10(end);
@@ -110,13 +138,15 @@ try
     total_energy_kwh = energy_ventilation_kwh + energy_hepa_kwh;
     total_cost_usd = total_energy_kwh * cost_per_kwh;
     
-    % Create results structure matching runManualComparison.m expectations
+    % -------------------------------------------------------------------------
+    % Prepare results structure
+    % -------------------------------------------------------------------------
     results = struct();
     results.total_PM10 = total_PM10;
     results.control_time = control_time;
     results.dt = dt;
     
-    % Add metadata
+    % Store metadata
     results.metadata = struct();
     results.metadata.hepa_enabled = hepaEnabled;
     results.metadata.PM10_avg_ugm3 = PM10_avg;
@@ -132,10 +162,11 @@ try
     fprintf('Simulation completed. Avg PM10: %.2f μg/m³, Total cost: $%.2f\n', ...
            PM10_avg, total_cost_usd);
 catch ME
+    % Handle errors
     fprintf('Error in intervention simulation: %s\n', ME.message);
     fprintf('Line: %d\n', ME.stack(1).line);
     
-    % Return empty results
+    % Return minimal results structure
     results = struct();
     results.total_PM10 = zeros(10, 1);
     results.control_time = 0:9;
@@ -144,7 +175,7 @@ catch ME
 end
 end
 
-% Helper function for inline if
+% Helper function for conditional text
 function result = iif(condition, trueVal, falseVal)
     if condition
         result = trueVal;
